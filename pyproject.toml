@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "z9null-monitor-cli"
+version = "0.1.0"
+description = "Agent-friendly Android syscall dynamic analysis CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "z9null" }
+]
+dependencies = []
+
+[project.scripts]
+z9mon = "z9mon.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
