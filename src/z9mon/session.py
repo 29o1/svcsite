@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+from collections import Counter
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+from typing import Any, Iterable, Mapping
+
+from z9mon.constants import SESSION_SCHEMA, SUMMARY_SCHEMA
+from z9mon.errors import EXIT_DATA, Z9MonError
+from z9mon.protocol import Event, ParseResult
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def create_session_directory(output_root: str | Path, package: str) -> Path:
+    root = Path(output_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    safe_package = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in package
+    )
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    path = root / f"{timestamp}-{safe_package}"
+    path.mkdir(mode=0o700)
+    return path
+
+
+def write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as stream:
+        stream.write(encoded)
+        stream.write("\n")
+        temporary = Path(stream.name)
+    temporary.replace(path)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sequence_quality(events: Iterable[Event]) -> dict[str, int]:
+    gaps = 0
+    missing = 0
+    previous: int | None = None
+    for event in events:
+        if previous is not None:
+            delta = (event.seq - previous) & 0xFFFFFFFF
+            if delta > 1:
+                gaps += 1
+                missing += delta - 1
+        previous = event.seq
+    return {"gaps": gaps, "missing": missing}
+
+
+def build_summary(
+    parsed: ParseResult,
+    syscall_names: Mapping[int, str],
+    *,
+    kernel_dropped: int,
+) -> dict[str, Any]:
+    by_syscall = Counter(
+        syscall_names.get(event.nr, f"sys_{event.nr}") for event in parsed.events
+    )
+    by_pid = Counter(str(event.tgid) for event in parsed.events)
+    by_tid = Counter(str(event.pid) for event in parsed.events)
+    return {
+        "schema_version": SUMMARY_SCHEMA,
+        "event_count": len(parsed.events),
+        "kernel_dropped": kernel_dropped,
+        "sequence": sequence_quality(parsed.events),
+        "parser": parsed.quality(),
+        "by_syscall": dict(sorted(by_syscall.items())),
+        "by_pid": dict(sorted(by_pid.items(), key=lambda item: int(item[0]))),
+        "by_tid": dict(sorted(by_tid.items(), key=lambda item: int(item[0]))),
+    }
+
+
+def resolve_session(path_value: str | Path) -> tuple[Path, Path, dict[str, Any]]:
+    path = Path(path_value).expanduser().resolve()
+    if path.is_dir():
+        session_dir = path
+        events_path = path / "events.bin"
+        manifest_path = path / "manifest.json"
+    elif path.is_file():
+        session_dir = path.parent
+        events_path = path
+        manifest_path = session_dir / "manifest.json"
+    else:
+        raise Z9MonError(
+            "SESSION_NOT_FOUND",
+            "capture session was not found",
+            EXIT_DATA,
+            {"path": str(path)},
+        )
+
+    if not events_path.is_file():
+        raise Z9MonError(
+            "EVENTS_NOT_FOUND",
+            "events.bin was not found",
+            EXIT_DATA,
+            {"path": str(events_path)},
+        )
+
+    manifest: dict[str, Any] = {}
+    if manifest_path.is_file():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                manifest = loaded
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Z9MonError(
+                "MANIFEST_INVALID",
+                "manifest.json could not be read",
+                EXIT_DATA,
+                {"path": str(manifest_path), "reason": str(exc)},
+            ) from exc
+    return session_dir, events_path, manifest
+
+
+def base_manifest() -> dict[str, Any]:
+    return {"schema_version": SESSION_SCHEMA}
