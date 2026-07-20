@@ -19,8 +19,13 @@ output, additional syscall argument decoding, and Android-side control
 compatibility. Migrated text files use LF line endings; this normalization does
 not change KPM behavior.
 
-The host-side Python package under `src/z9mon/`, its tests, command contract,
-and Agent-facing documentation are new work in this repository.
+The host-side Python package under `src/z9mon/`, command contract, and
+Agent-facing documentation are new work in this repository.
+
+This repository's KPM `1.1.0` additionally keeps the file writer active after
+monitoring is disabled until the in-kernel event buffer is empty, and exposes a
+small `sysnr` lookup command so host tools do not depend on oversized `ctl0`
+responses.
 
 ## KernelPatch
 

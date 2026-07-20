@@ -94,7 +94,7 @@ static unsigned long lookup_symbol_log(const char *name)
 }
 
 KPM_NAME("z9null_monitor");
-KPM_VERSION("1.0.0");
+KPM_VERSION("1.1.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Xiaowaaa,z9null");
 KPM_DESCRIPTION("Z9Null Monitor");
@@ -2109,17 +2109,17 @@ static int is_hooked_nr(int nr)
 
 static int ensure_hooked_nr(int nr)
 {
+    int i;
     if (nr < 0 || nr >= 460) return 0;
     if (is_hooked_nr(nr)) return 1;
-    if (dyn_hooks[nr].nr != nr) dyn_hooks[nr].nr = nr;
-    dyn_hooks[nr].active = 0;
-    dyn_hooks[nr].method = 0;
-    {
-        int narg;
-        for (narg = 6; narg >= 0; narg--) {
-            dyn_hooks[nr].narg = narg;
-            if (install_hook(&dyn_hooks[nr]) == 0) return 1;
-        }
+    /* Only install entries with a statically reviewed syscall arity. */
+    for (i = 0; i < (int)TIER1_COUNT; i++) {
+        if (tier1_hooks[i].nr == nr)
+            return install_hook(&tier1_hooks[i]) == 0;
+    }
+    for (i = 0; i < (int)TIER2_COUNT; i++) {
+        if (tier2_hooks[i].nr == nr)
+            return install_hook(&tier2_hooks[i]) == 0;
     }
     return 0;
 }
@@ -2829,7 +2829,11 @@ static int event_writer_thread(void *data)
             continue;
         }
 
-        if (!g_enabled) {
+        /*
+         * Disabling monitoring stops producers, but buffered events still need
+         * to reach EVENT_PATH before a host-side capture pulls the file.
+         */
+        if (!g_enabled && g_ev_count <= 0) {
             if (fp && !IS_ERR(fp) && g_filp_close) g_filp_close(fp, 0);
             fp = 0;
             if (g_msleep) g_msleep(200);
@@ -3022,7 +3026,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
             if (bitmap_test(g_nr_bitmap, i)) nr_logging++;
         }
         n = snprintf(buf, blen,
-            "{\"ok\":true,\"version\":\"1.0.0\",\"enabled\":%s,"
+            "{\"ok\":true,\"version\":\"1.1.0\",\"enabled\":%s,"
             "\"target_uid\":%d,\"hooks_installed\":%d,"
             "\"nrs_logging\":%d,\"events_total\":%d,"
             "\"events_buffered\":%d,\"events_dropped\":%u,\"tier2\":%s,"
@@ -3091,6 +3095,23 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
             n += snprintf(buf + n, blen - n, "{\"nr\":%d,\"name\":\"%s\"}", i, nm ? nm : "");
         }
         n += snprintf(buf + n, blen - n, "]}");
+    }
+
+    /* ---- sysnr <name> ---- */
+    else if (!strncmp(args, "sysnr ", 6)) {
+        const char *wanted = args + 6;
+        int found = -1;
+        int i;
+        for (i = 0; i < 460; i++) {
+            const char *nm = get_syscall_name(i);
+            if (nm && !strncmp(nm, "sys_", 4)) nm += 4;
+            if (nm && !strcmp(nm, wanted)) {
+                found = i;
+                break;
+            }
+        }
+        n = snprintf(buf, blen,
+            "{\"ok\":true,\"name\":\"%s\",\"nr\":%d}", wanted, found);
     }
 
     /* ---- uid <n> ---- */

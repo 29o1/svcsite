@@ -25,6 +25,13 @@ LLM.
 - Keep event queries bounded by a caller-provided limit.
 - `status` and `stop` should be safe to retry.
 - Module loading must remain an explicit operation.
+- Treat `capture` as the task-level write operation and `query` as read-only.
+- A capture must finish with monitoring disabled and `events_buffered == 0`.
+- Prefer `query --stats` or a narrow `query --limit N` over reading
+  `events.bin` directly.
+- Custom syscall selection is restricted to KPM Tier1/Tier2 hooks with a
+  statically declared arity; handle `SYSCALL_UNSUPPORTED` rather than retrying
+  arbitrary syscall numbers.
 
 ## Development commands
 
@@ -40,8 +47,38 @@ PYTHONPATH=src python3 -m z9mon doctor --device SERIAL --json
 PYTHONPATH=src python3 -m z9mon status --device SERIAL --json
 ```
 
-`stop`, future `capture`, and future module-loading commands affect device
-state. Use them only when the task requests that effect.
+Run one bounded capture:
+
+```bash
+PYTHONPATH=src python3 -m z9mon capture \
+  --device SERIAL \
+  --package TARGET \
+  --duration 15 \
+  --preset reverse-basic \
+  --launch \
+  --output ./captures \
+  --json
+```
+
+If the module is absent, report `MODULE_NOT_LOADED`; only use
+`--load-module /absolute/path/to/z9null_monitor.kpm` when module replacement was
+requested. Explicit module loading has a minimum 60-second per-command wait
+because it installs kernel hooks; `stop`, `capture`, and module loading affect
+device state.
+
+Read a bounded result:
+
+```bash
+PYTHONPATH=src python3 -m z9mon query \
+  /absolute/path/to/SESSION \
+  --syscall openat,read \
+  --contains /proc/ \
+  --limit 50 \
+  --json
+```
+
+Capture artifacts are `manifest.json`, `events.bin`, and `summary.json`.
+JSONL is produced only by `query --format jsonl`.
 
 ## Source boundaries
 

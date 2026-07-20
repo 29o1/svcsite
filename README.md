@@ -24,16 +24,15 @@ Codex / Claude Code / Human
        binary event artifacts
 ```
 
-## 当前状态
-
-第一阶段已经建立：
+## 当前能力
 
 - `doctor`：检查 ADB、设备、ABI、root、kpatch 和 SuperKey 配置。
 - `status`：读取 `z9null_monitor` KPM 状态。
 - `stop`：幂等地暂停 KPM 监控。
+- `capture`：按包名/UID 完成一次有界采集并生成独立 session。
+- `query`：对 session 做有界过滤、聚合或 JSONL 导出。
+- 二进制 v1 事件解析、损坏重同步、截断检测和序列缺口统计。
 - 本地二开 KPM 源码及可复现构建入口。
-
-`capture`、二进制协议解析和 `query` 将在下一阶段实现。
 
 ## 安装
 
@@ -72,6 +71,79 @@ z9mon status --device SERIAL --json
 z9mon stop --device SERIAL --json
 ```
 
+默认要求 `z9null_monitor` 已加载；模块缺失时返回稳定错误
+`MODULE_NOT_LOADED`。只有显式提供 `--load-module` 时才会替换并加载模块：
+
+```bash
+z9mon capture \
+  --device SERIAL \
+  --package io.example.target \
+  --duration 15 \
+  --preset reverse-basic \
+  --launch \
+  --output ./captures \
+  --load-module ./kpm/z9null_monitor.kpm \
+  --json
+```
+
+首次模块加载会安装内核 hook；CLI 为该步骤保留至少 60 秒的单命令等待时间，
+其余设备命令仍使用 `--timeout`（默认 15 秒）。
+
+后续采集可省略 `--load-module`：
+
+```bash
+z9mon capture \
+  --device SERIAL \
+  --package io.example.target \
+  --duration 15 \
+  --preset reverse-basic \
+  --restart \
+  --output ./captures \
+  --json
+```
+
+`--launch` 启动目标但不先清理状态；`--restart` 会先 `force-stop` 再启动，
+不会清除 App 数据。KPM 按目标 UID 采集，因此同 UID 的进程都会进入原始
+session，随后可按 PID/TID 查询。
+
+自定义 syscall 会覆盖 preset，可重复或使用逗号分隔：
+
+```bash
+z9mon capture \
+  --package io.example.target \
+  --duration 10 \
+  --syscall openat,read,ptrace \
+  --json
+```
+
+自定义项限定为 KPM 中已声明正确参数个数的 Tier1/Tier2 syscall；例如
+`openat`、`write`、`sendmsg`、`execveat`。不对任意 syscall 动态猜测参数
+个数，未支持项返回 `SYSCALL_UNSUPPORTED`。
+
+每次采集生成：
+
+```text
+captures/SESSION_ID/
+├── manifest.json
+├── events.bin
+└── summary.json
+```
+
+查询不会修改设备状态：
+
+```bash
+z9mon query ./captures/SESSION_ID --stats --json
+z9mon query ./captures/SESSION_ID \
+  --syscall openat,read \
+  --contains /proc/ \
+  --limit 50 \
+  --json
+z9mon query ./captures/SESSION_ID \
+  --syscall connect \
+  --limit 100 \
+  --format jsonl
+```
+
 `--json` 模式下 stdout 只包含一个紧凑 JSON 对象。诊断信息写入 stderr，
 并使用稳定的错误代码和进程退出码。
 
@@ -93,6 +165,18 @@ make kpm KP_DIR=/absolute/path/to/KernelPatch
 
 ```bash
 make check
+```
+
+`make check` 对提交内的 Python 源码执行语法检查。设备端验收命令为：
+
+```bash
+z9mon capture \
+  --package TARGET \
+  --duration 15 \
+  --preset reverse-basic \
+  --launch \
+  --output ./captures \
+  --json
 ```
 
 ## 来源

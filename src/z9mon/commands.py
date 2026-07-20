@@ -125,6 +125,12 @@ def run_stop(
         timeout=timeout,
         key_file=key_file,
     )
+    if not controller.is_loaded():
+        return {
+            "device": serial,
+            "module": MODULE_NAME,
+            "status": {"loaded": False, "enabled": False},
+        }
     return {
         "device": serial,
         "module": MODULE_NAME,
