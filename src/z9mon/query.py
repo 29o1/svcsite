@@ -5,6 +5,7 @@ from typing import Any, Sequence
 
 from z9mon.constants import KNOWN_SYSCALL_NAMES, KNOWN_SYSCALLS
 from z9mon.errors import EXIT_USAGE, Z9MonError
+from z9mon.maps import ModuleIndex
 from z9mon.protocol import Event, parse_events
 from z9mon.session import resolve_session, sequence_quality
 
@@ -77,6 +78,26 @@ def _matches(
     return True
 
 
+def _event_payload(
+    event: Event,
+    syscall_names: dict[int, str],
+    module_index: ModuleIndex | None,
+) -> dict[str, Any]:
+    payload = event.to_dict(syscall_names)
+    if module_index is None:
+        return payload
+    registers = payload["registers"]
+    registers["pc_resolved"] = module_index.resolve(event.tgid, event.pc)
+    registers["caller_resolved"] = module_index.resolve(event.tgid, event.caller)
+    registers["clone_fn_resolved"] = module_index.resolve(
+        event.tgid, event.clone_fn
+    )
+    payload["backtrace_resolved"] = [
+        module_index.resolve(event.tgid, address) for address in event.backtrace
+    ]
+    return payload
+
+
 def run_query(
     *,
     session: str,
@@ -89,6 +110,7 @@ def run_query(
 ) -> dict[str, Any]:
     session_dir, events_path, manifest = resolve_session(session)
     parsed = parse_events(events_path.read_bytes())
+    module_index = ModuleIndex.from_session(session_dir)
     by_name, by_number = _syscall_maps(manifest)
     selected = _resolve_syscall_filter(syscalls, by_name)
     matching = [
@@ -134,5 +156,11 @@ def run_query(
             "source_sequence": sequence_quality(parsed.events),
         },
         "parser": parsed.quality(),
-        "events": [event.to_dict(by_number) for event in returned],
+        "address_resolution": {
+            "available": module_index is not None,
+            "source": str(module_index.source) if module_index else None,
+        },
+        "events": [
+            _event_payload(event, by_number, module_index) for event in returned
+        ],
     }

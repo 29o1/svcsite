@@ -18,6 +18,7 @@ from z9mon.constants import (
 )
 from z9mon.errors import EXIT_KPM, EXIT_USAGE, Z9MonError
 from z9mon.kpm import KpmController, require_root
+from z9mon.maps import build_modules_document, capture_maps_snapshot
 from z9mon.protocol import parse_events
 from z9mon.session import (
     base_manifest,
@@ -198,7 +199,10 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     events_path = session_dir / "events.bin"
     manifest_path = session_dir / "manifest.json"
     summary_path = session_dir / "summary.json"
+    modules_path = session_dir / "modules.json"
+    maps_dir = session_dir / "maps"
     warnings: list[str] = []
+    maps_snapshots: list[dict[str, Any]] = []
     launch_result: dict[str, str] | None = None
     started_at = utc_now()
     monotonic_start = time.monotonic()
@@ -231,10 +235,30 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         elif not adb.package_pids(options.package):
             warnings.append("target package was not running when capture started")
 
+        maps_snapshots.append(
+            capture_maps_snapshot(
+                adb,
+                uid=uid,
+                maps_dir=maps_dir,
+                snapshot_id="post-launch",
+                warnings=warnings,
+                wait_seconds=1.5 if options.launch or options.restart else 0.0,
+            )
+        )
+
         try:
             time.sleep(options.duration)
         except KeyboardInterrupt:
             warnings.append("capture was stopped by an interrupt")
+        maps_snapshots.append(
+            capture_maps_snapshot(
+                adb,
+                uid=uid,
+                maps_dir=maps_dir,
+                snapshot_id="pre-stop",
+                warnings=warnings,
+            )
+        )
     finally:
         if monitoring_started:
             controller.stop()
@@ -253,6 +277,40 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
 
     ended_at = utc_now()
     target_pids = sorted({event.tgid for event in parsed.events})
+    mapped_pids = {
+        process["pid"]
+        for snapshot in maps_snapshots
+        for process in snapshot.get("processes", [])
+        if isinstance(process, dict) and isinstance(process.get("pid"), int)
+    }
+    missing_pids = set(target_pids) - mapped_pids
+    if missing_pids:
+        maps_snapshots.append(
+            capture_maps_snapshot(
+                adb,
+                uid=uid,
+                maps_dir=maps_dir,
+                snapshot_id="recovery",
+                warnings=warnings,
+                only_pids=missing_pids,
+            )
+        )
+    modules_document = build_modules_document(session_dir.name, maps_snapshots)
+    modules_written = True
+    try:
+        write_json(modules_path, modules_document)
+    except OSError:
+        modules_written = False
+        warnings.append("modules: MODULES_WRITE_FAILED")
+    mapped_pids = sorted(
+        {
+            process["pid"]
+            for snapshot in maps_snapshots
+            for process in snapshot.get("processes", [])
+            if isinstance(process, dict) and isinstance(process.get("pid"), int)
+        }
+    )
+    maps_directory = str(maps_dir.resolve()) if maps_dir.is_dir() else None
     selected_syscalls = [
         {"nr": number, "name": syscall_names.get(number, f"sys_{number}")}
         for number in syscall_numbers
@@ -274,6 +332,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             "package": options.package,
             "uid": uid,
             "observed_pids": target_pids,
+            "mapped_pids": mapped_pids,
         },
         "capture": {
             "preset": options.preset if not options.syscalls else None,
@@ -295,6 +354,12 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 "sha256": sha256_file(events_path),
             },
             "summary": {"path": str(summary_path)},
+            "modules": {
+                "path": str(modules_path) if modules_written else None,
+                "snapshot_count": len(maps_snapshots),
+                "mapped_pids": mapped_pids,
+            },
+            "maps": {"directory": maps_directory},
         },
         "warnings": warnings,
     }
@@ -311,6 +376,8 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             "manifest": str(manifest_path),
             "events": str(events_path),
             "summary": str(summary_path),
+            "modules": str(modules_path) if modules_written else None,
+            "maps": maps_directory,
         },
         "warnings": warnings,
     }

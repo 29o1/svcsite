@@ -27,8 +27,12 @@ LLM.
 - Module loading must remain an explicit operation.
 - Treat `capture` as the task-level write operation and `query` as read-only.
 - A capture must finish with monitoring disabled and `events_buffered == 0`.
+- Capture maps for every process under the target UID after launch and before
+  stop. Maps failures are warnings and must not invalidate syscall evidence.
 - Prefer `query --stats` or a narrow `query --limit N` over reading
   `events.bin` directly.
+- Preserve raw runtime addresses. Resolved module/base/offset fields are
+  additive, and sessions without `modules.json` remain queryable.
 - Custom syscall selection is restricted to KPM Tier1/Tier2 hooks with a
   statically declared arity; handle `SYSCALL_UNSUPPORTED` rather than retrying
   arbitrary syscall numbers.
@@ -77,8 +81,19 @@ PYTHONPATH=src python3 -m z9mon query \
   --json
 ```
 
-Capture artifacts are `manifest.json`, `events.bin`, and `summary.json`.
+Capture artifacts are `manifest.json`, `events.bin`, `summary.json`,
+`modules.json`, and raw snapshots under `maps/`.
 JSONL is produced only by `query --format jsonl`.
+
+Resolve one address without modifying device state:
+
+```bash
+PYTHONPATH=src python3 -m z9mon address resolve \
+  /absolute/path/to/SESSION \
+  --pid PID \
+  --address 0xADDRESS \
+  --json
+```
 
 ## Source boundaries
 

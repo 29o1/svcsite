@@ -10,6 +10,7 @@ from z9mon import __version__
 from z9mon.capture import CaptureOptions, run_capture
 from z9mon.commands import run_doctor, run_status, run_stop
 from z9mon.errors import EXIT_INTERNAL, EXIT_USAGE, Z9MonError
+from z9mon.maps import run_address_resolve
 from z9mon.output import error_payload, success_payload, write_payload
 from z9mon.query import run_query
 
@@ -37,6 +38,18 @@ def _positive_integer(value: str) -> int:
     if number <= 0:
         raise argparse.ArgumentTypeError("value must be greater than zero")
     return number
+
+
+def _address_value(value: str) -> int:
+    try:
+        address = int(value, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "address must be a decimal or 0x-prefixed hexadecimal integer"
+        ) from exc
+    if address <= 0:
+        raise argparse.ArgumentTypeError("address must be greater than zero")
+    return address
 
 
 def _flatten_values(values: Sequence[str]) -> tuple[str, ...]:
@@ -167,6 +180,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit one compact JSON object",
     )
 
+    address_parser = subparsers.add_parser(
+        "address",
+        help="resolve runtime addresses using a capture session's maps",
+    )
+    address_subparsers = address_parser.add_subparsers(
+        dest="address_command",
+        required=True,
+    )
+    resolve_parser = address_subparsers.add_parser(
+        "resolve",
+        help="resolve one runtime address to a module and relative offset",
+    )
+    resolve_parser.add_argument("session", help="capture session directory")
+    resolve_parser.add_argument(
+        "--pid",
+        required=True,
+        type=_positive_integer,
+        help="process ID whose maps should be used",
+    )
+    resolve_parser.add_argument(
+        "--address",
+        required=True,
+        type=_address_value,
+        help="runtime address in decimal or 0x-prefixed hexadecimal",
+    )
+    resolve_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one compact JSON object",
+    )
+
     return parser
 
 
@@ -177,10 +221,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         (
             value
             for value in argument_list
-            if value in {"doctor", "status", "stop", "capture", "query"}
+            if value in {"doctor", "status", "stop", "capture", "query", "address"}
         ),
         "cli",
     )
+    if operation == "address" and "resolve" in argument_list:
+        operation = "address.resolve"
     jsonl = operation == "query" and "jsonl" in argument_list
     compact = "--json" in argument_list or jsonl
 
@@ -223,7 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     load_module=args.load_module,
                 )
             )
-        else:
+        elif operation == "query":
             data = run_query(
                 session=args.session,
                 syscalls=_flatten_values(args.syscall),
@@ -232,6 +278,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 contains=args.contains,
                 limit=args.limit,
                 stats_only=args.stats,
+            )
+        else:
+            operation = "address.resolve"
+            data = run_address_resolve(
+                session=args.session,
+                pid=args.pid,
+                address=args.address,
             )
         payload = success_payload(operation, data)
         exit_code = 0

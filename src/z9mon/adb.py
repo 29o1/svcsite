@@ -17,6 +17,13 @@ class CommandResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class ProcessInfo:
+    pid: int
+    uid: int
+    name: str
+
+
 def parse_adb_devices(output: str) -> dict[str, str]:
     devices: dict[str, str] = {}
     for raw_line in output.splitlines():
@@ -27,6 +34,18 @@ def parse_adb_devices(output: str) -> dict[str, str]:
         if len(fields) >= 2:
             devices[fields[0]] = fields[1]
     return devices
+
+
+def parse_uid_processes(output: str, target_uid: int) -> list[ProcessInfo]:
+    processes: list[ProcessInfo] = []
+    for raw_line in output.splitlines():
+        fields = raw_line.strip().split(maxsplit=2)
+        if len(fields) < 3 or not fields[0].isdecimal() or not fields[1].isdecimal():
+            continue
+        pid, uid = int(fields[0]), int(fields[1])
+        if pid > 0 and uid == target_uid:
+            processes.append(ProcessInfo(pid=pid, uid=uid, name=fields[2]))
+    return sorted(processes, key=lambda process: process.pid)
 
 
 class AdbClient:
@@ -272,6 +291,35 @@ class AdbClient:
                 if value.isdecimal() and int(value) > 0
             }
         )
+
+    def processes_for_uid(self, uid: int) -> list[ProcessInfo]:
+        result = self.shell("ps -A -o PID,UID,NAME\n")
+        if result.returncode != 0:
+            raise Z9MonError(
+                "PROCESS_LIST_FAILED",
+                "failed to list Android processes",
+                EXIT_DEVICE,
+                {"uid": uid, "stderr": result.stderr.strip()},
+            )
+        return parse_uid_processes(result.stdout, uid)
+
+    def read_process_maps(self, pid: int) -> str:
+        if pid <= 0:
+            raise Z9MonError(
+                "PID_INVALID",
+                "process ID must be greater than zero",
+                EXIT_DEVICE,
+                {"pid": pid},
+            )
+        result = self.root_shell(f"cat /proc/{pid}/maps")
+        if result.returncode != 0:
+            raise Z9MonError(
+                "MAPS_READ_FAILED",
+                "failed to read process maps",
+                EXIT_DEVICE,
+                {"pid": pid, "stderr": result.stderr.strip()},
+            )
+        return result.stdout
 
     def force_stop(self, package: str) -> None:
         result = self.shell(f"am force-stop {shlex_quote(package)}\n")

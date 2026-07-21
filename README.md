@@ -31,6 +31,8 @@ Codex / Claude Code / Human
 - `stop`：幂等地暂停 KPM 监控。
 - `capture`：按包名/UID 完成一次有界采集并生成独立 session。
 - `query`：对 session 做有界过滤、聚合或 JSONL 导出。
+- `address resolve`：把运行时地址归一化为模块、基址和模块内偏移。
+- 采集目标 UID 下所有进程的 `/proc/<pid>/maps`，并自动补充事件地址信息。
 - 二进制 v1 事件解析、损坏重同步、截断检测和序列缺口统计。
 - 本地二开 KPM 源码及可复现构建入口。
 
@@ -126,8 +128,16 @@ z9mon capture \
 captures/SESSION_ID/
 ├── manifest.json
 ├── events.bin
-└── summary.json
+├── summary.json
+├── modules.json
+└── maps/
+    ├── post-launch-PID.maps
+    └── pre-stop-PID.maps
 ```
+
+`modules.json` 保留启动后和停止前的进程映射快照；若事件中出现尚未覆盖的
+PID，还会尝试生成 recovery 快照。maps 获取失败只记录 warning，不会让一次
+已完成的 syscall 采集失败。
 
 查询不会修改设备状态：
 
@@ -142,7 +152,17 @@ z9mon query ./captures/SESSION_ID \
   --syscall connect \
   --limit 100 \
   --format jsonl
+
+z9mon address resolve ./captures/SESSION_ID \
+  --pid 12345 \
+  --address 0x7a12345678 \
+  --json
 ```
+
+当 session 含有 `modules.json` 时，`query` 会保留原始 `pc`、`caller`、
+`clone_fn` 和 backtrace 地址，并增加对应的 `*_resolved` 字段。解析结果只做
+运行时地址归一化（`module`、`module_base`、`module_offset`），v0.3 不拉取
+ELF，也不提供符号名或源码行信息。旧 session 没有 `modules.json` 时仍可查询。
 
 `--json` 模式下 stdout 只包含一个紧凑 JSON 对象。诊断信息写入 stderr，
 并使用稳定的错误代码和进程退出码。
