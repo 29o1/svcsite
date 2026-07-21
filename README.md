@@ -161,8 +161,11 @@ z9mon address resolve ./captures/SESSION_ID \
 
 当 session 含有 `modules.json` 时，`query` 会保留原始 `pc`、`caller`、
 `clone_fn` 和 backtrace 地址，并增加对应的 `*_resolved` 字段。解析结果只做
-运行时地址归一化（`module`、`module_base`、`module_offset`），v0.3 不拉取
-ELF，也不提供符号名或源码行信息。旧 session 没有 `modules.json` 时仍可查询。
+运行时地址归一化（`module`、`module_id`、`module_base`、`module_offset`）。
+`module` 是适合展示的 basename；`module_id` 组合完整规范化路径、设备号和
+inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modules.json`
+缺少该字段时会在查询阶段自动推导。v0.3.1 不拉取 ELF，也不提供符号名或源码
+行信息；旧 session 没有 `modules.json` 时仍可查询。
 
 `--json` 模式下 stdout 只包含一个紧凑 JSON 对象。诊断信息写入 stderr，
 并使用稳定的错误代码和进程退出码。

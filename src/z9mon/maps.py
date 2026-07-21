@@ -24,6 +24,21 @@ def _module_name(path: str) -> str | None:
     return PurePosixPath(normalized).name or normalized
 
 
+def _module_id(
+    path: str | None,
+    device: str | None,
+    inode: int | None,
+) -> str | None:
+    if not path:
+        return None
+    normalized = path.removesuffix(" (deleted)")
+    if normalized.startswith("["):
+        return f"special:{normalized}"
+    if device and inode is not None:
+        return f"file:{device}:{inode}:{normalized}"
+    return f"file:{normalized}"
+
+
 @dataclass(frozen=True)
 class ParsedMaps:
     mappings: tuple[dict[str, Any], ...]
@@ -66,6 +81,7 @@ def parse_proc_maps(raw: str) -> ParsedMaps:
                 "inode": inode,
                 "path": path or None,
                 "module": _module_name(path),
+                "module_id": _module_id(path, device, inode),
             }
         )
     return ParsedMaps(tuple(mappings), invalid_lines)
@@ -243,9 +259,22 @@ class ModuleIndex:
         module_base = start - file_offset
         if module_base < 0:
             module_base = start
+        path = mapping.get("path")
+        module_id = mapping.get("module_id")
+        if not isinstance(module_id, str):
+            module_id = _module_id(
+                path if isinstance(path, str) else None,
+                mapping.get("device")
+                if isinstance(mapping.get("device"), str)
+                else None,
+                mapping.get("inode")
+                if isinstance(mapping.get("inode"), int)
+                else None,
+            )
         return {
             "module": mapping.get("module"),
-            "path": mapping.get("path"),
+            "module_id": module_id,
+            "path": path,
             "module_base": _hex(module_base),
             "module_offset": _hex(address - module_base),
             "mapping_start": _hex(start),

@@ -33,6 +33,9 @@ LLM.
   `events.bin` directly.
 - Preserve raw runtime addresses. Resolved module/base/offset fields are
   additive, and sessions without `modules.json` remain queryable.
+- Treat `module` as a display name only. Use `module_id` or the full `path`
+  when comparing mappings because unrelated APKs and libraries can share a
+  basename.
 - Custom syscall selection is restricted to KPM Tier1/Tier2 hooks with a
   statically declared arity; handle `SYSCALL_UNSUPPORTED` rather than retrying
   arbitrary syscall numbers.
