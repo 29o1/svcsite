@@ -33,9 +33,9 @@ Codex / Claude Code / Human
 - `query`：对 session 做有界过滤、聚合或 JSONL 导出。
 - `address resolve`：把运行时地址归一化为模块、基址和模块内偏移。
 - 采集目标 UID 下所有进程的 `/proc/<pid>/maps`，并自动补充事件地址信息。
-- KPM 记录独立的 PC、LR 和最多 7 层 FP-chain；查询额外给出 ARM64
+- KPM 记录独立的 PC、LR 和最多 16 层 FP-chain；查询额外给出 ARM64
   返回地址对应的调用指令位置（`return_address - 4`）。
-- 二进制 v1 事件解析、损坏重同步、截断检测和序列缺口统计。
+- 二进制 v1/v2 事件解析、损坏重同步、截断检测和序列缺口统计。
 - 本地二开 KPM 源码及可复现构建入口。
 
 ## 安装
@@ -166,7 +166,7 @@ z9mon address resolve ./captures/SESSION_ID \
 运行时地址归一化（`module`、`module_id`、`module_base`、`module_offset`）。
 `module` 是适合展示的 basename；`module_id` 组合完整规范化路径、设备号和
 inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modules.json`
-缺少该字段时会在查询阶段自动推导。v0.4.0 不拉取 ELF，也不提供符号名或源码
+缺少该字段时会在查询阶段自动推导。v0.5.0 不拉取 ELF，也不提供符号名或源码
 行信息；旧 session 没有 `modules.json` 时仍可查询。
 
 `caller` 和 FP-chain 中的地址是 ARM64 返回地址。查询保留这些原始证据，

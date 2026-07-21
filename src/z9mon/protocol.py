@@ -6,14 +6,18 @@ from typing import Any, Mapping
 
 
 EVENT_MAGIC = 0x45435653
-EVENT_VERSION = 1
-FIXED_RECORD_SIZE = 212
+EVENT_VERSION = 2
+FIXED_RECORD_SIZE = 284
 MAX_RECORD_SIZE = 2048
 MAX_DESCRIPTION_SIZE = 1023
 
 _MAGIC_BYTES = struct.pack("<I", EVENT_MAGIC)
-_FIXED_RECORD = struct.Struct("<IHHIIiiii12QII7Q16sHH")
-assert _FIXED_RECORD.size == FIXED_RECORD_SIZE
+_RECORD_LAYOUTS = {
+    1: (struct.Struct("<IHHIIiiii12QII7Q16sHH"), 7),
+    2: (struct.Struct("<IHHIIiiii12QII16Q16sHH"), 16),
+}
+assert _RECORD_LAYOUTS[1][0].size == 212
+assert _RECORD_LAYOUTS[2][0].size == FIXED_RECORD_SIZE
 
 
 def _hex(value: int) -> str:
@@ -111,11 +115,14 @@ def parse_events(data: bytes) -> ParseResult:
             break
 
         _, version, _, record_length = struct.unpack_from("<IHHI", data, offset)
-        if (
-            version != EVENT_VERSION
-            or record_length < FIXED_RECORD_SIZE
-            or record_length > MAX_RECORD_SIZE
-        ):
+        layout = _RECORD_LAYOUTS.get(version)
+        if layout is None or record_length > MAX_RECORD_SIZE:
+            invalid_records += 1
+            offset += 1
+            continue
+        fixed_record, max_backtrace = layout
+        fixed_record_size = fixed_record.size
+        if record_length < fixed_record_size:
             invalid_records += 1
             offset += 1
             continue
@@ -123,22 +130,25 @@ def parse_events(data: bytes) -> ParseResult:
             truncated_bytes = len(data) - offset
             break
 
-        values = _FIXED_RECORD.unpack_from(data, offset)
-        description_length = values[31]
+        values = fixed_record.unpack_from(data, offset)
+        comm_index = 23 + max_backtrace
+        description_length = values[comm_index + 1]
         if (
             description_length > MAX_DESCRIPTION_SIZE
-            or FIXED_RECORD_SIZE + description_length > record_length
+            or fixed_record_size + description_length > record_length
         ):
             invalid_records += 1
             offset += 1
             continue
 
-        comm = values[30].split(b"\0", 1)[0].decode("utf-8", errors="replace")
-        desc_start = offset + FIXED_RECORD_SIZE
+        comm = values[comm_index].split(b"\0", 1)[0].decode(
+            "utf-8", errors="replace"
+        )
+        desc_start = offset + fixed_record_size
         description = data[
             desc_start : desc_start + description_length
         ].decode("utf-8", errors="replace")
-        bt_depth = min(values[21], 7)
+        bt_depth = min(values[21], max_backtrace)
         events.append(
             Event(
                 version=values[1],

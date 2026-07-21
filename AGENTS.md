@@ -35,6 +35,8 @@ LLM.
   additive, and sessions without `modules.json` remain queryable.
 - Preserve raw ARM64 return addresses. Derived callsites subtract four bytes
   and remain additive; do not treat the syscall PC itself as a return address.
+- Keep binary v1 sessions readable while new captures use binary v2 with up to
+  16 FP-chain return addresses.
 - Treat `module` as a display name only. Use `module_id` or the full `path`
   when comparing mappings because unrelated APKs and libraries can share a
   basename.

@@ -94,7 +94,7 @@ static unsigned long lookup_symbol_log(const char *name)
 }
 
 KPM_NAME("z9null_monitor");
-KPM_VERSION("1.2.0");
+KPM_VERSION("1.3.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Xiaowaaa,z9null");
 KPM_DESCRIPTION("Z9Null Monitor");
@@ -287,7 +287,7 @@ typedef struct {
 
 /* Event record — expanded for detailed parsing */
 //这里参数的读取在内核态进行解析，但是调用地址返回地址在APK侧读取maps文件进行解析
-#define MAX_BT 7
+#define MAX_BT 16
 typedef struct {
     unsigned int seq;          // 事件序列号
     int nr;                    // syscall 号
@@ -2647,7 +2647,7 @@ static int consume_peeked_event(unsigned int seq)
 static int format_event_jsonl(char *buf, int blen, const svc_event_t *ev)
 {
     char esc_desc[DESC_BUF_SIZE + 256];
-    char btbuf[256];
+    char btbuf[512];
     int bn = 0;
     int i;
     if (!buf || blen <= 0 || !ev) return 0;
@@ -2740,7 +2740,7 @@ static int format_event_bin(unsigned char *buf, int blen, const svc_event_t *ev)
     if (!buf || blen <= 0 || !ev) return 0;
 
     if (!put_u32(buf, blen, &off, 0x45435653U)) return 0;
-    if (!put_u16(buf, blen, &off, 1)) return 0;
+    if (!put_u16(buf, blen, &off, 2)) return 0;
     if (!put_u16(buf, blen, &off, 0)) return 0;
     if (!put_u32(buf, blen, &off, 0)) return 0;
 
@@ -3024,7 +3024,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
             if (bitmap_test(g_nr_bitmap, i)) nr_logging++;
         }
         n = snprintf(buf, blen,
-            "{\"ok\":true,\"version\":\"1.2.0\",\"enabled\":%s,"
+            "{\"ok\":true,\"version\":\"1.3.0\",\"enabled\":%s,"
             "\"target_uid\":%d,\"hooks_installed\":%d,"
             "\"nrs_logging\":%d,\"events_total\":%d,"
             "\"events_buffered\":%d,\"events_dropped\":%u,\"tier2\":%s,"
@@ -3275,7 +3275,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
                     svc_event_t *ev = &g_events[idx];
                     json_escape(esc, sizeof(esc), ev->desc);
                 {
-                    char btbuf[256];
+                    char btbuf[512];
                     int bn = 0;
                     int bi;
                     bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, "[");

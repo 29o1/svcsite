@@ -25,7 +25,9 @@ Agent-facing documentation are new work in this repository.
 This repository's KPM `1.1.0` added stop-and-drain behavior and a small `sysnr`
 lookup command. KPM `1.2.0` keeps PC and LR in their dedicated event fields,
 uses all seven backtrace slots for distinct FP-chain return addresses, and
-leaves the binary v1 record layout unchanged.
+leaves the binary v1 record layout unchanged. KPM `1.3.0` expands the FP-chain
+to 16 return addresses and writes binary v2 records; the host parser retains
+binary v1 compatibility.
 
 ## KernelPatch
 
