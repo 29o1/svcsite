@@ -94,7 +94,7 @@ static unsigned long lookup_symbol_log(const char *name)
 }
 
 KPM_NAME("z9null_monitor");
-KPM_VERSION("1.1.0");
+KPM_VERSION("1.2.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Xiaowaaa,z9null");
 KPM_DESCRIPTION("Z9Null Monitor");
@@ -393,16 +393,11 @@ static unsigned int unwind_user_fp(struct pt_regs *r, unsigned long bt[MAX_BT])
 {
     unsigned long fp;
     unsigned long frame[2];
+    unsigned long last_ret;
     unsigned int d = 0;
 
     if (!r || !bt) return 0;
-    {
-        unsigned long pc = strip_ptr((unsigned long)r->pc);
-        unsigned long lr = strip_ptr((unsigned long)r->regs[30]);
-        if (is_user_addr(pc)) bt[d++] = pc;
-        if (d < MAX_BT && is_user_addr(lr)) bt[d++] = lr;
-    }
-
+    last_ret = strip_ptr((unsigned long)r->regs[30]);
     fp = strip_ptr((unsigned long)r->regs[29]);
     if (!g_copy_from_user) return d;
 
@@ -415,7 +410,10 @@ static unsigned int unwind_user_fp(struct pt_regs *r, unsigned long bt[MAX_BT])
         next_fp = strip_ptr(frame[0]);
         ret = strip_ptr(frame[1]);
         if (!is_user_addr(ret)) break;
-        bt[d++] = ret;
+        if (ret != last_ret) {
+            bt[d++] = ret;
+            last_ret = ret;
+        }
         if (next_fp <= fp) break;
         if (next_fp - fp > 0x40000UL) break;
         fp = next_fp;
@@ -3026,7 +3024,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
             if (bitmap_test(g_nr_bitmap, i)) nr_logging++;
         }
         n = snprintf(buf, blen,
-            "{\"ok\":true,\"version\":\"1.1.0\",\"enabled\":%s,"
+            "{\"ok\":true,\"version\":\"1.2.0\",\"enabled\":%s,"
             "\"target_uid\":%d,\"hooks_installed\":%d,"
             "\"nrs_logging\":%d,\"events_total\":%d,"
             "\"events_buffered\":%d,\"events_dropped\":%u,\"tier2\":%s,"

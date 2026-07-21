@@ -33,6 +33,8 @@ Codex / Claude Code / Human
 - `query`：对 session 做有界过滤、聚合或 JSONL 导出。
 - `address resolve`：把运行时地址归一化为模块、基址和模块内偏移。
 - 采集目标 UID 下所有进程的 `/proc/<pid>/maps`，并自动补充事件地址信息。
+- KPM 记录独立的 PC、LR 和最多 7 层 FP-chain；查询额外给出 ARM64
+  返回地址对应的调用指令位置（`return_address - 4`）。
 - 二进制 v1 事件解析、损坏重同步、截断检测和序列缺口统计。
 - 本地二开 KPM 源码及可复现构建入口。
 
@@ -164,8 +166,13 @@ z9mon address resolve ./captures/SESSION_ID \
 运行时地址归一化（`module`、`module_id`、`module_base`、`module_offset`）。
 `module` 是适合展示的 basename；`module_id` 组合完整规范化路径、设备号和
 inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modules.json`
-缺少该字段时会在查询阶段自动推导。v0.3.1 不拉取 ELF，也不提供符号名或源码
+缺少该字段时会在查询阶段自动推导。v0.4.0 不拉取 ELF，也不提供符号名或源码
 行信息；旧 session 没有 `modules.json` 时仍可查询。
+
+`caller` 和 FP-chain 中的地址是 ARM64 返回地址。查询保留这些原始证据，
+并额外输出 `caller_callsite`、`backtrace_callsites` 及对应的 resolved 字段，
+方便直接把调用指令的模块内偏移交给静态分析工具。旧 KPM 的 backtrace 会
+重复包含 PC；该位置的 callsite 返回 `null`，避免错误执行 `PC - 4`。
 
 `--json` 模式下 stdout 只包含一个紧凑 JSON 对象。诊断信息写入 stderr，
 并使用稳定的错误代码和进程退出码。

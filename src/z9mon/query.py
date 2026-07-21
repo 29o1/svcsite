@@ -10,6 +10,10 @@ from z9mon.protocol import Event, parse_events
 from z9mon.session import resolve_session, sequence_quality
 
 
+def _hex(value: int) -> str:
+    return f"0x{value:x}"
+
+
 def _syscall_maps(manifest: dict[str, Any]) -> tuple[dict[str, int], dict[int, str]]:
     by_name = dict(KNOWN_SYSCALLS)
     by_number = dict(KNOWN_SYSCALL_NAMES)
@@ -84,16 +88,39 @@ def _event_payload(
     module_index: ModuleIndex | None,
 ) -> dict[str, Any]:
     payload = event.to_dict(syscall_names)
+    caller_callsite = event.caller - 4 if event.caller >= 4 else None
+    backtrace_callsites = [
+        None if address == event.pc or address < 4 else address - 4
+        for address in event.backtrace
+    ]
+    registers = payload["registers"]
+    registers["caller_callsite"] = (
+        _hex(caller_callsite) if caller_callsite is not None else None
+    )
+    payload["backtrace_callsites"] = [
+        _hex(address) if address is not None else None
+        for address in backtrace_callsites
+    ]
     if module_index is None:
         return payload
-    registers = payload["registers"]
     registers["pc_resolved"] = module_index.resolve(event.tgid, event.pc)
     registers["caller_resolved"] = module_index.resolve(event.tgid, event.caller)
+    registers["caller_callsite_resolved"] = (
+        module_index.resolve(event.tgid, caller_callsite)
+        if caller_callsite is not None
+        else None
+    )
     registers["clone_fn_resolved"] = module_index.resolve(
         event.tgid, event.clone_fn
     )
     payload["backtrace_resolved"] = [
         module_index.resolve(event.tgid, address) for address in event.backtrace
+    ]
+    payload["backtrace_callsites_resolved"] = [
+        module_index.resolve(event.tgid, address)
+        if address is not None
+        else None
+        for address in backtrace_callsites
     ]
     return payload
 

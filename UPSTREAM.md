@@ -22,10 +22,10 @@ not change KPM behavior.
 The host-side Python package under `src/z9mon/`, command contract, and
 Agent-facing documentation are new work in this repository.
 
-This repository's KPM `1.1.0` additionally keeps the file writer active after
-monitoring is disabled until the in-kernel event buffer is empty, and exposes a
-small `sysnr` lookup command so host tools do not depend on oversized `ctl0`
-responses.
+This repository's KPM `1.1.0` added stop-and-drain behavior and a small `sysnr`
+lookup command. KPM `1.2.0` keeps PC and LR in their dedicated event fields,
+uses all seven backtrace slots for distinct FP-chain return addresses, and
+leaves the binary v1 record layout unchanged.
 
 ## KernelPatch
 

@@ -33,6 +33,8 @@ LLM.
   `events.bin` directly.
 - Preserve raw runtime addresses. Resolved module/base/offset fields are
   additive, and sessions without `modules.json` remain queryable.
+- Preserve raw ARM64 return addresses. Derived callsites subtract four bytes
+  and remain additive; do not treat the syscall PC itself as a return address.
 - Treat `module` as a display name only. Use `module_id` or the full `path`
   when comparing mappings because unrelated APKs and libraries can share a
   basename.
