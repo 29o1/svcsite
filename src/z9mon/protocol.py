@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+import mmap
+from pathlib import Path
 import struct
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 
 EVENT_MAGIC = 0x45435653
@@ -95,62 +98,75 @@ class ParseResult:
         }
 
 
-def parse_events(data: bytes) -> ParseResult:
-    events: list[Event] = []
-    skipped_bytes = 0
-    invalid_records = 0
-    truncated_bytes = 0
-    offset = 0
+class EventStream(Iterator[Event]):
+    """Incrementally decode events from a bytes-like object."""
 
-    while offset < len(data):
-        marker = data.find(_MAGIC_BYTES, offset)
-        if marker < 0:
-            skipped_bytes += len(data) - offset
-            break
-        skipped_bytes += marker - offset
-        offset = marker
+    def __init__(self, data: Any) -> None:
+        self._data = data
+        self._offset = 0
+        self.events = 0
+        self.skipped_bytes = 0
+        self.invalid_records = 0
+        self.truncated_bytes = 0
 
-        if len(data) - offset < 12:
-            truncated_bytes = len(data) - offset
-            break
+    def __iter__(self) -> EventStream:
+        return self
 
-        _, version, _, record_length = struct.unpack_from("<IHHI", data, offset)
-        layout = _RECORD_LAYOUTS.get(version)
-        if layout is None or record_length > MAX_RECORD_SIZE:
-            invalid_records += 1
-            offset += 1
-            continue
-        fixed_record, max_backtrace = layout
-        fixed_record_size = fixed_record.size
-        if record_length < fixed_record_size:
-            invalid_records += 1
-            offset += 1
-            continue
-        if len(data) - offset < record_length:
-            truncated_bytes = len(data) - offset
-            break
+    def __next__(self) -> Event:
+        data = self._data
+        while self._offset < len(data):
+            marker = data.find(_MAGIC_BYTES, self._offset)
+            if marker < 0:
+                self.skipped_bytes += len(data) - self._offset
+                self._offset = len(data)
+                break
+            self.skipped_bytes += marker - self._offset
+            self._offset = marker
 
-        values = fixed_record.unpack_from(data, offset)
-        comm_index = 23 + max_backtrace
-        description_length = values[comm_index + 1]
-        if (
-            description_length > MAX_DESCRIPTION_SIZE
-            or fixed_record_size + description_length > record_length
-        ):
-            invalid_records += 1
-            offset += 1
-            continue
+            if len(data) - self._offset < 12:
+                self.truncated_bytes = len(data) - self._offset
+                self._offset = len(data)
+                break
 
-        comm = values[comm_index].split(b"\0", 1)[0].decode(
-            "utf-8", errors="replace"
-        )
-        desc_start = offset + fixed_record_size
-        description = data[
-            desc_start : desc_start + description_length
-        ].decode("utf-8", errors="replace")
-        bt_depth = min(values[21], max_backtrace)
-        events.append(
-            Event(
+            _, version, _, record_length = struct.unpack_from(
+                "<IHHI", data, self._offset
+            )
+            layout = _RECORD_LAYOUTS.get(version)
+            if layout is None or record_length > MAX_RECORD_SIZE:
+                self.invalid_records += 1
+                self._offset += 1
+                continue
+            fixed_record, max_backtrace = layout
+            fixed_record_size = fixed_record.size
+            if record_length < fixed_record_size:
+                self.invalid_records += 1
+                self._offset += 1
+                continue
+            if len(data) - self._offset < record_length:
+                self.truncated_bytes = len(data) - self._offset
+                self._offset = len(data)
+                break
+
+            values = fixed_record.unpack_from(data, self._offset)
+            comm_index = 23 + max_backtrace
+            description_length = values[comm_index + 1]
+            if (
+                description_length > MAX_DESCRIPTION_SIZE
+                or fixed_record_size + description_length > record_length
+            ):
+                self.invalid_records += 1
+                self._offset += 1
+                continue
+
+            comm = values[comm_index].split(b"\0", 1)[0].decode(
+                "utf-8", errors="replace"
+            )
+            desc_start = self._offset + fixed_record_size
+            description = data[
+                desc_start : desc_start + description_length
+            ].decode("utf-8", errors="replace")
+            bt_depth = min(values[21], max_backtrace)
+            event = Event(
                 version=values[1],
                 flags=values[2],
                 record_length=values[3],
@@ -170,12 +186,39 @@ def parse_events(data: bytes) -> ParseResult:
                 comm=comm,
                 description=description,
             )
-        )
-        offset += record_length
+            self._offset += record_length
+            self.events += 1
+            return event
+
+        raise StopIteration
+
+    def quality(self) -> dict[str, int]:
+        return {
+            "events": self.events,
+            "skipped_bytes": self.skipped_bytes,
+            "invalid_records": self.invalid_records,
+            "truncated_bytes": self.truncated_bytes,
+        }
+
+
+@contextmanager
+def open_event_stream(path: str | Path) -> Iterator[EventStream]:
+    source = Path(path)
+    with source.open("rb") as file:
+        if source.stat().st_size == 0:
+            yield EventStream(b"")
+            return
+        with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            yield EventStream(data)
+
+
+def parse_events(data: bytes) -> ParseResult:
+    stream = EventStream(data)
+    events = tuple(stream)
 
     return ParseResult(
-        events=tuple(events),
-        skipped_bytes=skipped_bytes,
-        invalid_records=invalid_records,
-        truncated_bytes=truncated_bytes,
+        events=events,
+        skipped_bytes=stream.skipped_bytes,
+        invalid_records=stream.invalid_records,
+        truncated_bytes=stream.truncated_bytes,
     )

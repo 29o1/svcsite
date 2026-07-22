@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -43,6 +45,22 @@ def _module_id(
 class ParsedMaps:
     mappings: tuple[dict[str, Any], ...]
     invalid_lines: int
+
+
+@dataclass(frozen=True)
+class _IndexedMapping:
+    start: int
+    end: int
+    file_offset: int
+    mapping: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ProcessSnapshot:
+    snapshot_id: Any
+    captured_at: Any
+    starts: tuple[int, ...]
+    mappings: tuple[_IndexedMapping, ...]
 
 
 def parse_proc_maps(raw: str) -> ParsedMaps:
@@ -190,6 +208,55 @@ class ModuleIndex:
                 {"path": str(source)},
             )
         self.snapshots = snapshots
+        self._by_pid = self._build_index(snapshots)
+
+    @staticmethod
+    def _build_index(
+        snapshots: list[Any],
+    ) -> dict[int, tuple[_ProcessSnapshot, ...]]:
+        by_pid: dict[int, list[_ProcessSnapshot]] = {}
+        for snapshot in reversed(snapshots):
+            if not isinstance(snapshot, dict):
+                continue
+            processes = snapshot.get("processes")
+            if not isinstance(processes, list):
+                continue
+            for process in processes:
+                if not isinstance(process, dict) or not isinstance(
+                    process.get("pid"), int
+                ):
+                    continue
+                indexed: list[_IndexedMapping] = []
+                mappings = process.get("mappings")
+                if not isinstance(mappings, list):
+                    continue
+                for mapping in mappings:
+                    if not isinstance(mapping, dict):
+                        continue
+                    try:
+                        start = int(str(mapping["start"]), 0)
+                        end = int(str(mapping["end"]), 0)
+                        file_offset = int(str(mapping["file_offset"]), 0)
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if end <= start:
+                        continue
+                    indexed.append(
+                        _IndexedMapping(start, end, file_offset, mapping)
+                    )
+                indexed.sort(key=lambda item: item.start)
+                if not indexed:
+                    continue
+                pid = process["pid"]
+                by_pid.setdefault(pid, []).append(
+                    _ProcessSnapshot(
+                        snapshot.get("snapshot_id"),
+                        snapshot.get("captured_at"),
+                        tuple(item.start for item in indexed),
+                        tuple(indexed),
+                    )
+                )
+        return {pid: tuple(items) for pid, items in by_pid.items()}
 
     @classmethod
     def from_session(cls, session_dir: Path) -> ModuleIndex | None:
@@ -214,48 +281,36 @@ class ModuleIndex:
             )
         return cls(source, document)
 
+    @lru_cache(maxsize=32768)
     def resolve(self, pid: int, address: int) -> dict[str, Any] | None:
         if address <= 0:
             return None
-        for snapshot in reversed(self.snapshots):
-            if not isinstance(snapshot, dict):
+        for snapshot in self._by_pid.get(pid, ()):
+            index = bisect_right(snapshot.starts, address) - 1
+            if index < 0:
                 continue
-            processes = snapshot.get("processes")
-            if not isinstance(processes, list):
+            mapping = snapshot.mappings[index]
+            if address >= mapping.end:
                 continue
-            for process in processes:
-                if not isinstance(process, dict) or process.get("pid") != pid:
-                    continue
-                mappings = process.get("mappings")
-                if not isinstance(mappings, list):
-                    continue
-                for mapping in mappings:
-                    resolved = self._resolve_mapping(mapping, address)
-                    if resolved is not None:
-                        return {
-                            "runtime": _hex(address),
-                            "pid": pid,
-                            "snapshot_id": snapshot.get("snapshot_id"),
-                            "captured_at": snapshot.get("captured_at"),
-                            **resolved,
-                        }
+            resolved = self._resolved_payload(mapping, address)
+            return {
+                "runtime": _hex(address),
+                "pid": pid,
+                "snapshot_id": snapshot.snapshot_id,
+                "captured_at": snapshot.captured_at,
+                **resolved,
+            }
         return None
 
     @staticmethod
-    def _resolve_mapping(
-        mapping: Any,
+    def _resolved_payload(
+        indexed: _IndexedMapping,
         address: int,
-    ) -> dict[str, Any] | None:
-        if not isinstance(mapping, dict):
-            return None
-        try:
-            start = int(str(mapping["start"]), 0)
-            end = int(str(mapping["end"]), 0)
-            file_offset = int(str(mapping["file_offset"]), 0)
-        except (KeyError, TypeError, ValueError):
-            return None
-        if not start <= address < end:
-            return None
+    ) -> dict[str, Any]:
+        start = indexed.start
+        end = indexed.end
+        file_offset = indexed.file_offset
+        mapping = indexed.mapping
         module_base = start - file_offset
         if module_base < 0:
             module_base = start

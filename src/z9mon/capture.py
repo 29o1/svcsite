@@ -19,18 +19,20 @@ from z9mon.constants import (
 from z9mon.errors import EXIT_KPM, EXIT_USAGE, Z9MonError
 from z9mon.kpm import KpmController, require_root
 from z9mon.maps import build_modules_document, capture_maps_snapshot
-from z9mon.protocol import parse_events
 from z9mon.session import (
     base_manifest,
-    build_summary,
     create_session_directory,
     sha256_file,
+    summarize_event_file,
     utc_now,
     write_json,
 )
 
 
 _PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
+_PID_WARNING_PATTERN = re.compile(
+    r"^(?P<snapshot>[^:]+): pid (?P<pid>\d+): (?P<code>[A-Z][A-Z0-9_]+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,25 @@ def _shell_value(adb: AdbClient, command: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _compact_warnings(warnings: Sequence[str]) -> list[str]:
+    grouped: dict[tuple[str, str], list[int]] = {}
+    compact: list[str] = []
+    for warning in warnings:
+        match = _PID_WARNING_PATTERN.fullmatch(warning)
+        if match is None:
+            compact.append(warning)
+            continue
+        key = (match.group("snapshot"), match.group("code"))
+        grouped.setdefault(key, []).append(int(match.group("pid")))
+    for (snapshot, code), pids in grouped.items():
+        examples = ",".join(str(pid) for pid in pids[:5])
+        suffix = ",..." if len(pids) > 5 else ""
+        compact.append(
+            f"{snapshot}: {code} count={len(pids)} pids={examples}{suffix}"
+        )
+    return compact
+
+
 def run_capture(options: CaptureOptions) -> dict[str, Any]:
     if not _PACKAGE_PATTERN.fullmatch(options.package):
         raise Z9MonError(
@@ -266,17 +287,15 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
 
     adb.make_root_file_readable(EVENT_PATH)
     adb.pull(EVENT_PATH, events_path)
-    raw_events = events_path.read_bytes()
-    parsed = parse_events(raw_events)
-    summary = build_summary(
-        parsed,
+    summary, observed_pids = summarize_event_file(
+        events_path,
         syscall_names,
         kernel_dropped=int(final_status.get("events_dropped", 0)),
     )
     write_json(summary_path, summary)
 
     ended_at = utc_now()
-    target_pids = sorted({event.tgid for event in parsed.events})
+    target_pids = sorted(observed_pids)
     mapped_pids = {
         process["pid"]
         for snapshot in maps_snapshots
@@ -350,7 +369,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         "artifacts": {
             "events": {
                 "path": str(events_path),
-                "size": len(raw_events),
+                "size": events_path.stat().st_size,
                 "sha256": sha256_file(events_path),
             },
             "summary": {"path": str(summary_path)},
@@ -379,5 +398,5 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             "modules": str(modules_path) if modules_written else None,
             "maps": maps_directory,
         },
-        "warnings": warnings,
+        "warnings": _compact_warnings(warnings),
     }

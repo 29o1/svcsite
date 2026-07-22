@@ -8,12 +8,16 @@ from z9mon.errors import Z9MonError
 
 
 def success_payload(operation: str, data: dict[str, Any]) -> dict[str, Any]:
+    payload_data = dict(data)
+    warnings = payload_data.pop("warnings", [])
+    if not isinstance(warnings, list):
+        warnings = []
     return {
         "schema_version": RESULT_SCHEMA,
         "ok": True,
         "operation": operation,
-        "data": data,
-        "warnings": [],
+        "data": payload_data,
+        "warnings": warnings,
     }
 
 

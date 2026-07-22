@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping
 
 from z9mon.constants import SESSION_SCHEMA, SUMMARY_SCHEMA
 from z9mon.errors import EXIT_DATA, Z9MonError
-from z9mon.protocol import Event, ParseResult
+from z9mon.protocol import Event, ParseResult, open_event_stream
 
 
 def utc_now() -> str:
@@ -96,6 +96,49 @@ def build_summary(
         "by_pid": dict(sorted(by_pid.items(), key=lambda item: int(item[0]))),
         "by_tid": dict(sorted(by_tid.items(), key=lambda item: int(item[0]))),
     }
+
+
+def summarize_event_file(
+    path: str | Path,
+    syscall_names: Mapping[int, str],
+    *,
+    kernel_dropped: int,
+) -> tuple[dict[str, Any], set[int]]:
+    by_syscall: Counter[str] = Counter()
+    by_pid: Counter[str] = Counter()
+    by_tid: Counter[str] = Counter()
+    observed_pids: set[int] = set()
+    previous: int | None = None
+    gaps = 0
+    missing = 0
+
+    with open_event_stream(path) as stream:
+        for event in stream:
+            by_syscall[syscall_names.get(event.nr, f"sys_{event.nr}")] += 1
+            by_pid[str(event.tgid)] += 1
+            by_tid[str(event.pid)] += 1
+            observed_pids.add(event.tgid)
+            if previous is not None:
+                delta = (event.seq - previous) & 0xFFFFFFFF
+                if delta > 1:
+                    gaps += 1
+                    missing += delta - 1
+            previous = event.seq
+        parser_quality = stream.quality()
+
+    return (
+        {
+            "schema_version": SUMMARY_SCHEMA,
+            "event_count": parser_quality["events"],
+            "kernel_dropped": kernel_dropped,
+            "sequence": {"gaps": gaps, "missing": missing},
+            "parser": parser_quality,
+            "by_syscall": dict(sorted(by_syscall.items())),
+            "by_pid": dict(sorted(by_pid.items(), key=lambda item: int(item[0]))),
+            "by_tid": dict(sorted(by_tid.items(), key=lambda item: int(item[0]))),
+        },
+        observed_pids,
+    )
 
 
 def resolve_session(path_value: str | Path) -> tuple[Path, Path, dict[str, Any]]:

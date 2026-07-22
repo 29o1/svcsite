@@ -31,6 +31,10 @@ LLM.
   stop. Maps failures are warnings and must not invalidate syscall evidence.
 - Prefer `query --stats` or a narrow `query --limit N` over reading
   `events.bin` directly.
+- Query defaults to compact address details and 20 events. Use
+  `--detail full` only when mapping bounds and permissions are required.
+- Use `query --module-id MODULE_ID --callsite-stats` to rank unique syscall
+  callsites for one exact mapped binary.
 - Preserve raw runtime addresses. Resolved module/base/offset fields are
   additive, and sessions without `modules.json` remain queryable.
 - Preserve raw ARM64 return addresses. Derived callsites subtract four bytes

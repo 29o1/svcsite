@@ -30,12 +30,14 @@ Codex / Claude Code / Human
 - `status`：读取 `z9null_monitor` KPM 状态。
 - `stop`：幂等地暂停 KPM 监控。
 - `capture`：按包名/UID 完成一次有界采集并生成独立 session。
-- `query`：对 session 做有界过滤、聚合或 JSONL 导出。
+- `query`：对 session 做有界过滤、调用点聚合或 JSONL 导出。
 - `address resolve`：把运行时地址归一化为模块、基址和模块内偏移。
 - 采集目标 UID 下所有进程的 `/proc/<pid>/maps`，并自动补充事件地址信息。
 - KPM 记录独立的 PC、LR 和最多 16 层 FP-chain；查询额外给出 ARM64
   返回地址对应的调用指令位置（`return_address - 4`）。
 - 二进制 v1/v2 事件解析、损坏重同步、截断检测和序列缺口统计。
+- 使用流式事件扫描和 maps 区间索引处理大型 session，避免把全部事件对象
+  常驻内存。
 - 本地二开 KPM 源码及可复现构建入口。
 
 ## 安装
@@ -155,19 +157,36 @@ z9mon query ./captures/SESSION_ID \
   --limit 100 \
   --format jsonl
 
+z9mon query ./captures/SESSION_ID \
+  --callsite-stats \
+  --limit 20 \
+  --json
+
+z9mon query ./captures/SESSION_ID \
+  --module-id 'file:DEVICE:INODE:/absolute/device/path/libtarget.so' \
+  --callsite-stats \
+  --limit 20 \
+  --json
+
 z9mon address resolve ./captures/SESSION_ID \
   --pid 12345 \
   --address 0x7a12345678 \
   --json
 ```
 
-当 session 含有 `modules.json` 时，`query` 会保留原始 `pc`、`caller`、
-`clone_fn` 和 backtrace 地址，并增加对应的 `*_resolved` 字段。解析结果只做
+普通查询默认最多返回 20 条 compact 事件；需要旧版完整映射字段时使用
+`--detail full`。当 session 含有 `modules.json` 时，`query` 会保留原始
+`pc`、`caller`、`clone_fn` 和 backtrace 地址，并增加调用点对应的 resolved
+字段。解析结果只做
 运行时地址归一化（`module`、`module_id`、`module_base`、`module_offset`）。
 `module` 是适合展示的 basename；`module_id` 组合完整规范化路径、设备号和
 inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modules.json`
-缺少该字段时会在查询阶段自动推导。v0.5.0 不拉取 ELF，也不提供符号名或源码
+缺少该字段时会在查询阶段自动推导。v0.6.0 不拉取 ELF，也不提供符号名或源码
 行信息；旧 session 没有 `modules.json` 时仍可查询。
+
+`--module-id` 使用唯一模块标识筛选包含该模块调用点的事件；
+`--callsite-stats` 不返回事件明细，而是按 syscall、模块和模块内偏移聚合唯一
+调用点，适合直接交给 Agent 或静态分析工具继续处理。
 
 `caller` 和 FP-chain 中的地址是 ARM64 返回地址。查询保留这些原始证据，
 并额外输出 `caller_callsite`、`backtrace_callsites` 及对应的 resolved 字段，
@@ -175,7 +194,8 @@ inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modul
 重复包含 PC；该位置的 callsite 返回 `null`，避免错误执行 `PC - 4`。
 
 `--json` 模式下 stdout 只包含一个紧凑 JSON 对象。诊断信息写入 stderr，
-并使用稳定的错误代码和进程退出码。
+并使用稳定的错误代码和进程退出码。capture warning 位于结果信封顶层；重复
+的短生命周期 PID maps warning 会聚合，完整明细仍保存在 `manifest.json`。
 
 ## 构建 KPM
 

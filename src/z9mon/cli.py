@@ -160,13 +160,30 @@ def build_parser() -> argparse.ArgumentParser:
     query_parser.add_argument(
         "--limit",
         type=_positive_integer,
-        default=100,
-        help="maximum returned events (default: 100)",
+        default=20,
+        help="maximum returned events or callsites (default: 20)",
     )
     query_parser.add_argument(
         "--stats",
         action="store_true",
         help="return aggregate counts without event objects",
+    )
+    query_parser.add_argument(
+        "--module-id",
+        action="append",
+        default=[],
+        help="require a callsite with this exact module_id; may be repeated",
+    )
+    query_parser.add_argument(
+        "--callsite-stats",
+        action="store_true",
+        help="rank unique resolved callsites without returning event objects",
+    )
+    query_parser.add_argument(
+        "--detail",
+        choices=("compact", "full"),
+        default="compact",
+        help="event address detail (default: compact)",
     )
     query_parser.add_argument(
         "--format",
@@ -233,8 +250,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser.parse_args(argument_list)
         operation = args.command
-        compact = args.json
         jsonl = operation == "query" and args.format == "jsonl"
+        compact = args.json or jsonl
         if operation == "doctor":
             data = run_doctor(
                 device=args.device,
@@ -270,6 +287,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         elif operation == "query":
+            if args.format == "jsonl" and (args.stats or args.callsite_stats):
+                raise Z9MonError(
+                    "USAGE_ERROR",
+                    "JSONL output requires event objects, not aggregate-only mode",
+                    EXIT_USAGE,
+                )
             data = run_query(
                 session=args.session,
                 syscalls=_flatten_values(args.syscall),
@@ -278,6 +301,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 contains=args.contains,
                 limit=args.limit,
                 stats_only=args.stats,
+                detail=args.detail,
+                module_ids=tuple(args.module_id),
+                callsite_stats=args.callsite_stats,
             )
         else:
             operation = "address.resolve"
