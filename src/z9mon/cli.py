@@ -113,25 +113,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="active capture duration in seconds (default: 15)",
     )
     capture_parser.add_argument(
-        "--preset",
-        default="reverse-basic",
-        help="syscall preset (default: reverse-basic)",
-    )
-    capture_parser.add_argument(
         "--syscall",
         action="append",
         default=[],
-        help="custom syscall name/number; repeat or comma-separate (overrides preset)",
+        help=(
+            "custom syscall name/number; repeat or comma-separate; "
+            "defaults to reverse-basic"
+        ),
     )
     capture_parser.add_argument(
-        "--launch",
-        action="store_true",
-        help="launch the target without first stopping it",
-    )
-    capture_parser.add_argument(
-        "--restart",
-        action="store_true",
-        help="force-stop and relaunch the target without clearing app data",
+        "--target-mode",
+        choices=("attach", "launch", "restart"),
+        default="attach",
+        help="target lifecycle mode (default: attach)",
     )
     capture_parser.add_argument(
         "--output",
@@ -164,20 +158,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum returned events or callsites (default: 20)",
     )
     query_parser.add_argument(
-        "--stats",
-        action="store_true",
-        help="return aggregate counts without event objects",
+        "--mode",
+        choices=("events", "stats", "callsites"),
+        default="events",
+        help="query result mode (default: events)",
     )
     query_parser.add_argument(
         "--module-id",
         action="append",
         default=[],
         help="require a callsite with this exact module_id; may be repeated",
-    )
-    query_parser.add_argument(
-        "--callsite-stats",
-        action="store_true",
-        help="rank unique resolved callsites without returning event objects",
     )
     query_parser.add_argument(
         "--detail",
@@ -234,13 +224,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     argument_list = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    operation = next(
-        (
-            value
-            for value in argument_list
-            if value in {"doctor", "status", "stop", "capture", "query", "address"}
-        ),
-        "cli",
+    operation = (
+        argument_list[0]
+        if argument_list
+        and argument_list[0]
+        in {"doctor", "status", "stop", "capture", "query", "address"}
+        else "cli"
     )
     if operation == "address" and "resolve" in argument_list:
         operation = "address.resolve"
@@ -278,32 +267,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                     key_file=args.key_file,
                     package=args.package,
                     duration=args.duration,
-                    preset=args.preset,
                     syscalls=_flatten_values(args.syscall),
-                    launch=args.launch,
-                    restart=args.restart,
+                    target_mode=args.target_mode,
                     output=args.output,
                     load_module=args.load_module,
                 )
             )
         elif operation == "query":
-            if args.format == "jsonl" and (args.stats or args.callsite_stats):
+            if args.json and args.format == "jsonl":
                 raise Z9MonError(
                     "USAGE_ERROR",
-                    "JSONL output requires event objects, not aggregate-only mode",
+                    "--json and --format jsonl are mutually exclusive",
+                    EXIT_USAGE,
+                )
+            if args.format == "jsonl" and args.mode != "events":
+                raise Z9MonError(
+                    "USAGE_ERROR",
+                    "JSONL output requires query mode events",
+                    EXIT_USAGE,
+                )
+            if args.mode != "events" and args.detail != "compact":
+                raise Z9MonError(
+                    "USAGE_ERROR",
+                    "--detail applies only to query mode events",
                     EXIT_USAGE,
                 )
             data = run_query(
                 session=args.session,
+                mode=args.mode,
                 syscalls=_flatten_values(args.syscall),
                 pid=args.pid,
                 tid=args.tid,
                 contains=args.contains,
                 limit=args.limit,
-                stats_only=args.stats,
                 detail=args.detail,
                 module_ids=tuple(args.module_id),
-                callsite_stats=args.callsite_stats,
             )
         else:
             operation = "address.resolve"

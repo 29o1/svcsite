@@ -256,25 +256,53 @@ def _sorted_callsites(
     return callsites
 
 
+def _update_module_counts(
+    counts: dict[tuple[str | None, str | None, str | None], dict[str, Any]],
+    callsites: Sequence[dict[str, Any]],
+) -> None:
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    for callsite in callsites:
+        resolved = callsite["resolved"]
+        key = (
+            resolved.get("module_id"),
+            resolved.get("path"),
+            resolved.get("module"),
+        )
+        if not isinstance(key[0], str):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        current = counts.get(key)
+        if current is None:
+            counts[key] = {
+                "module": key[2],
+                "module_id": key[0],
+                "path": key[1],
+                "event_count": 1,
+            }
+        else:
+            current["event_count"] += 1
+
+
 def run_query(
     *,
     session: str,
+    mode: str,
     syscalls: Sequence[str],
     pid: int | None,
     tid: int | None,
     contains: str | None,
     limit: int,
-    stats_only: bool,
     detail: str = "compact",
     module_ids: Sequence[str] = (),
-    callsite_stats: bool = False,
 ) -> dict[str, Any]:
     session_dir, events_path, manifest = resolve_session(session)
     module_index = ModuleIndex.from_session(session_dir)
     by_name, by_number = _syscall_maps(manifest)
     selected = _resolve_syscall_filter(syscalls, by_name)
     selected_module_ids = {value for value in module_ids if value}
-    if (selected_module_ids or callsite_stats) and module_index is None:
+    if (selected_module_ids or mode == "callsites") and module_index is None:
         raise Z9MonError(
             "MODULES_NOT_FOUND",
             "module-aware query requires modules.json",
@@ -287,6 +315,9 @@ def run_query(
     by_pid: Counter[str] = Counter()
     callsite_counts: dict[
         tuple[int, str | None, str | None, str | None, str], dict[str, Any]
+    ] = {}
+    module_counts: dict[
+        tuple[str | None, str | None, str | None], dict[str, Any]
     ] = {}
     total = 0
     matched = 0
@@ -313,15 +344,18 @@ def run_query(
                 continue
             callsites = (
                 _event_callsites(event, module_index)
-                if module_index is not None and (selected_module_ids or callsite_stats)
+                if module_index is not None
+                and (selected_module_ids or mode in {"stats", "callsites"})
                 else []
             )
             if not _module_matches(callsites, selected_module_ids):
                 continue
             matched += 1
-            by_syscall[by_number.get(event.nr, f"sys_{event.nr}")] += 1
-            by_pid[str(event.tgid)] += 1
-            if callsite_stats:
+            if mode == "stats":
+                by_syscall[by_number.get(event.nr, f"sys_{event.nr}")] += 1
+                by_pid[str(event.tgid)] += 1
+                _update_module_counts(module_counts, callsites)
+            elif mode == "callsites":
                 _update_callsite_counts(
                     callsite_counts,
                     event,
@@ -329,56 +363,83 @@ def run_query(
                     by_number,
                     selected_module_ids,
                 )
-            elif not stats_only and len(returned) < limit:
+            elif len(returned) < limit:
                 returned.append(event)
         parser_quality = stream.quality()
 
-    ranked_callsites = _sorted_callsites(callsite_counts)
-    returned_callsites = ranked_callsites[:limit]
-    event_payloads = [
-        _event_payload(event, by_number, module_index, detail) for event in returned
-    ]
+    filters: dict[str, Any] = {}
+    if syscalls:
+        filters["syscalls"] = list(syscalls)
+    if pid is not None:
+        filters["pid"] = pid
+    if tid is not None:
+        filters["tid"] = tid
+    if contains:
+        filters["contains"] = contains
+    if module_ids:
+        filters["module_ids"] = list(module_ids)
 
-    return {
+    result: dict[str, Any] = {
         "session": str(session_dir),
         "source": str(events_path),
-        "query": {
-            "syscalls": list(syscalls),
-            "pid": pid,
-            "tid": tid,
-            "contains": contains,
-            "module_ids": list(module_ids),
-            "limit": limit,
-            "stats_only": stats_only,
-            "callsite_stats": callsite_stats,
-            "detail": detail,
-        },
+        "mode": mode,
+        "filters": filters,
+        "limit": limit,
         "counts": {
             "total": total,
             "matched": matched,
-            "returned": len(event_payloads),
-            "truncated": max(0, matched - len(event_payloads))
-            if not stats_only and not callsite_stats
-            else 0,
         },
-        "callsite_counts": {
-            "unique": len(ranked_callsites),
-            "returned": len(returned_callsites),
-            "truncated": max(0, len(ranked_callsites) - len(returned_callsites)),
-        },
-        "stats": {
-            "by_syscall": dict(sorted(by_syscall.items())),
-            "by_pid": dict(sorted(by_pid.items(), key=lambda item: int(item[0]))),
-            "source_sequence": {
+        "quality": {
+            "sequence": {
                 "gaps": sequence_gaps,
                 "missing": sequence_missing,
             },
+            "parser": parser_quality,
         },
-        "parser": parser_quality,
         "address_resolution": {
             "available": module_index is not None,
             "source": str(module_index.source) if module_index else None,
         },
-        "events": event_payloads,
-        "callsites": returned_callsites,
     }
+    if mode == "events":
+        event_payloads = [
+            _event_payload(event, by_number, module_index, detail)
+            for event in returned
+        ]
+        result["detail"] = detail
+        result["counts"].update(
+            {
+                "returned": len(event_payloads),
+                "truncated": max(0, matched - len(event_payloads)),
+            }
+        )
+        result["events"] = event_payloads
+    elif mode == "stats":
+        ranked_modules = sorted(
+            module_counts.values(),
+            key=lambda item: (
+                -item["event_count"],
+                item["module_id"] or "",
+            ),
+        )
+        returned_modules = ranked_modules[:limit]
+        result["module_counts"] = {
+            "unique": len(ranked_modules),
+            "returned": len(returned_modules),
+            "truncated": max(0, len(ranked_modules) - len(returned_modules)),
+        }
+        result["stats"] = {
+            "by_syscall": dict(sorted(by_syscall.items())),
+            "by_pid": dict(sorted(by_pid.items(), key=lambda item: int(item[0]))),
+            "by_module": returned_modules,
+        }
+    else:
+        ranked_callsites = _sorted_callsites(callsite_counts)
+        returned_callsites = ranked_callsites[:limit]
+        result["callsite_counts"] = {
+            "unique": len(ranked_callsites),
+            "returned": len(returned_callsites),
+            "truncated": max(0, len(ranked_callsites) - len(returned_callsites)),
+        }
+        result["callsites"] = returned_callsites
+    return result

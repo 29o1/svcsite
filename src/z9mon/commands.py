@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import platform
-import sys
 from typing import Any
 
 from z9mon.adb import AdbClient

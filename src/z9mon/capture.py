@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import time
-from pathlib import Path
 from typing import Any, Sequence
 
 from z9mon.adb import AdbClient
@@ -30,9 +29,6 @@ from z9mon.session import (
 
 
 _PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
-_PID_WARNING_PATTERN = re.compile(
-    r"^(?P<snapshot>[^:]+): pid (?P<pid>\d+): (?P<code>[A-Z][A-Z0-9_]+)$"
-)
 
 
 @dataclass(frozen=True)
@@ -42,21 +38,24 @@ class CaptureOptions:
     key_file: str | None
     package: str
     duration: float
-    preset: str
     syscalls: tuple[str, ...]
-    launch: bool
-    restart: bool
+    target_mode: str
     output: str
     load_module: str | None
 
 
-def _module_supports_drain(status: dict[str, Any]) -> None:
+def _module_version(status: dict[str, Any]) -> tuple[int, int]:
     version = str(status.get("version", ""))
     try:
         major, minor, *_ = (int(part) for part in version.split("."))
     except (TypeError, ValueError):
-        major, minor = 0, 0
-    if (major, minor) < (1, 1):
+        return 0, 0
+    return major, minor
+
+
+def _module_supports_drain(status: dict[str, Any]) -> None:
+    if _module_version(status) < (1, 1):
+        version = str(status.get("version", ""))
         raise Z9MonError(
             "MODULE_VERSION_UNSUPPORTED",
             "loaded KPM does not support reliable stop-and-drain capture",
@@ -88,27 +87,14 @@ def _wait_for_drain(
     )
 
 
-def _syscall_table() -> tuple[dict[str, int], dict[int, str]]:
-    by_name = dict(KNOWN_SYSCALLS)
-    by_number = dict(KNOWN_SYSCALL_NAMES)
-    return by_name, by_number
-
-
 def _select_syscalls(
     controller: KpmController,
-    preset: str,
     requested: Sequence[str],
 ) -> tuple[list[int], dict[int, str]]:
-    by_name, by_number = _syscall_table()
+    by_name = dict(KNOWN_SYSCALLS)
+    by_number = dict(KNOWN_SYSCALL_NAMES)
     raw_values = list(requested)
     if not raw_values:
-        if preset != "reverse-basic":
-            raise Z9MonError(
-                "PRESET_UNKNOWN",
-                "unknown capture preset",
-                EXIT_USAGE,
-                {"preset": preset, "available": ["reverse-basic"]},
-            )
         raw_values = [name for name, _ in REVERSE_BASIC_SYSCALLS]
 
     selected: list[int] = []
@@ -167,21 +153,31 @@ def _shell_value(adb: AdbClient, command: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _compact_warnings(warnings: Sequence[str]) -> list[str]:
+def _compact_warnings(
+    warnings: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str], list[int]] = {}
-    compact: list[str] = []
+    compact: list[dict[str, Any]] = []
     for warning in warnings:
-        match = _PID_WARNING_PATTERN.fullmatch(warning)
-        if match is None:
+        phase = warning.get("phase")
+        code = warning.get("code")
+        pid = warning.get("pid")
+        if not isinstance(phase, str) or not isinstance(code, str) or not isinstance(
+            pid, int
+        ):
             compact.append(warning)
             continue
-        key = (match.group("snapshot"), match.group("code"))
-        grouped.setdefault(key, []).append(int(match.group("pid")))
-    for (snapshot, code), pids in grouped.items():
-        examples = ",".join(str(pid) for pid in pids[:5])
-        suffix = ",..." if len(pids) > 5 else ""
+        grouped.setdefault((phase, code), []).append(pid)
+    for (phase, code), pids in grouped.items():
         compact.append(
-            f"{snapshot}: {code} count={len(pids)} pids={examples}{suffix}"
+            {
+                "code": code,
+                "phase": phase,
+                "count": len(pids),
+                "pids": pids[:5],
+                "pids_truncated": len(pids) > 5,
+                "evidence_valid": True,
+            }
         )
     return compact
 
@@ -194,7 +190,6 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             EXIT_USAGE,
             {"package": options.package},
         )
-
     adb = AdbClient(timeout=options.timeout)
     serial = adb.resolve_serial(options.device)
     require_root(adb)
@@ -210,10 +205,11 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
 
     initial_status = controller.status()
     _module_supports_drain(initial_status)
+    if _module_version(initial_status) < (1, 4):
+        controller.configure_legacy_capture()
     uid = adb.package_uid(options.package)
     syscall_numbers, syscall_names = _select_syscalls(
         controller,
-        options.preset,
         options.syscalls,
     )
     session_dir = create_session_directory(options.output, options.package)
@@ -222,7 +218,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     summary_path = session_dir / "summary.json"
     modules_path = session_dir / "modules.json"
     maps_dir = session_dir / "maps"
-    warnings: list[str] = []
+    warnings: list[dict[str, Any]] = []
     maps_snapshots: list[dict[str, Any]] = []
     launch_result: dict[str, str] | None = None
     started_at = utc_now()
@@ -235,8 +231,6 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         _wait_for_drain(controller, options.timeout)
         adb.truncate_root_file(EVENT_PATH)
         controller.clear()
-        controller.writer_binary()
-        controller.disable_filp_open()
         controller.set_uid(uid)
         configured = controller.set_nrs(syscall_numbers)
         if int(configured.get("skipped", 0)) != 0:
@@ -247,14 +241,21 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 {"response": configured},
             )
 
+        if options.target_mode == "restart":
+            adb.force_stop(options.package)
+
         controller.start()
         monitoring_started = True
-        if options.restart:
-            adb.force_stop(options.package)
-        if options.launch or options.restart:
+        if options.target_mode in {"launch", "restart"}:
             launch_result = adb.launch_package(options.package)
         elif not adb.package_pids(options.package):
-            warnings.append("target package was not running when capture started")
+            warnings.append(
+                {
+                    "code": "TARGET_NOT_RUNNING",
+                    "phase": "capture-start",
+                    "evidence_valid": True,
+                }
+            )
 
         maps_snapshots.append(
             capture_maps_snapshot(
@@ -263,14 +264,22 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 maps_dir=maps_dir,
                 snapshot_id="post-launch",
                 warnings=warnings,
-                wait_seconds=1.5 if options.launch or options.restart else 0.0,
+                wait_seconds=1.5
+                if options.target_mode in {"launch", "restart"}
+                else 0.0,
             )
         )
 
         try:
             time.sleep(options.duration)
         except KeyboardInterrupt:
-            warnings.append("capture was stopped by an interrupt")
+            warnings.append(
+                {
+                    "code": "CAPTURE_INTERRUPTED",
+                    "phase": "capture",
+                    "evidence_valid": True,
+                }
+            )
         maps_snapshots.append(
             capture_maps_snapshot(
                 adb,
@@ -320,7 +329,13 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         write_json(modules_path, modules_document)
     except OSError:
         modules_written = False
-        warnings.append("modules: MODULES_WRITE_FAILED")
+        warnings.append(
+            {
+                "code": "MODULES_WRITE_FAILED",
+                "phase": "modules",
+                "evidence_valid": True,
+            }
+        )
     mapped_pids = sorted(
         {
             process["pid"]
@@ -354,10 +369,9 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             "mapped_pids": mapped_pids,
         },
         "capture": {
-            "preset": options.preset if not options.syscalls else None,
+            "selection": "custom" if options.syscalls else "reverse-basic",
             "syscalls": selected_syscalls,
-            "launch": options.launch,
-            "restart": options.restart,
+            "target_mode": options.target_mode,
             "launch_result": launch_result,
         },
         "module": {

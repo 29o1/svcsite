@@ -196,7 +196,6 @@ class KpmController:
                     "remote_path": remote_path,
                 },
             )
-        self.require_loaded()
         return {
             "local_path": str(path),
             "remote_path": remote_path,
@@ -269,23 +268,16 @@ class KpmController:
         return self.ctl0(f"uid {uid}")
 
     def set_nrs(self, syscall_numbers: list[int]) -> dict[str, Any]:
-        if not syscall_numbers:
-            raise Z9MonError(
-                "SYSCALL_SET_EMPTY",
-                "at least one syscall is required",
-                EXIT_KPM,
-            )
         encoded = ",".join(str(number) for number in syscall_numbers)
         return self.ctl0(f"set_nrs {encoded}")
 
     def clear(self) -> dict[str, Any]:
         return self.ctl0("clear")
 
-    def writer_binary(self) -> dict[str, Any]:
-        return self.ctl0("writer_mode bin")
-
-    def disable_filp_open(self) -> dict[str, Any]:
-        return self.ctl0("filp_open off")
+    def configure_legacy_capture(self) -> None:
+        """Normalize mutable writer controls that existed before KPM v1.4."""
+        self.ctl0("writer_mode bin")
+        self.ctl0("filp_open off")
 
     def start(self) -> dict[str, Any]:
         return self.ctl0("enable")

@@ -82,22 +82,6 @@ class Event:
         }
 
 
-@dataclass(frozen=True)
-class ParseResult:
-    events: tuple[Event, ...]
-    skipped_bytes: int
-    invalid_records: int
-    truncated_bytes: int
-
-    def quality(self) -> dict[str, int]:
-        return {
-            "events": len(self.events),
-            "skipped_bytes": self.skipped_bytes,
-            "invalid_records": self.invalid_records,
-            "truncated_bytes": self.truncated_bytes,
-        }
-
-
 class EventStream(Iterator[Event]):
     """Incrementally decode events from a bytes-like object."""
 
@@ -210,15 +194,3 @@ def open_event_stream(path: str | Path) -> Iterator[EventStream]:
             return
         with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as data:
             yield EventStream(data)
-
-
-def parse_events(data: bytes) -> ParseResult:
-    stream = EventStream(data)
-    events = tuple(stream)
-
-    return ParseResult(
-        events=events,
-        skipped_bytes=stream.skipped_bytes,
-        invalid_records=stream.invalid_records,
-        truncated_bytes=stream.truncated_bytes,
-    )

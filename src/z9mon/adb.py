@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 from typing import Sequence
@@ -168,8 +169,6 @@ class AdbClient:
         return self._run(("shell",), input_text=script)
 
     def root_shell(self, command: str) -> CommandResult:
-        import shlex
-
         return self.shell(f"exec su -c {shlex.quote(command)}\n")
 
     def push(self, local_path: str | Path, remote_path: str) -> None:
@@ -203,8 +202,6 @@ class AdbClient:
             )
 
     def truncate_root_file(self, path: str) -> None:
-        import shlex
-
         result = self.root_shell(f": > {shlex.quote(path)}")
         if result.returncode != 0:
             raise Z9MonError(
@@ -219,8 +216,6 @@ class AdbClient:
             )
 
     def make_root_file_readable(self, path: str) -> None:
-        import shlex
-
         result = self.root_shell(f"chmod 0644 {shlex.quote(path)}")
         if result.returncode != 0:
             raise Z9MonError(
@@ -235,8 +230,6 @@ class AdbClient:
             )
 
     def getprop(self, name: str) -> str:
-        import shlex
-
         result = self.shell(f"getprop {shlex.quote(name)}\n")
         if result.returncode != 0:
             raise Z9MonError(
@@ -252,7 +245,7 @@ class AdbClient:
         return result.stdout.strip()
 
     def package_uid(self, package: str) -> int:
-        result = self.shell(f"cmd package list packages -U {shlex_quote(package)}\n")
+        result = self.shell(f"cmd package list packages -U {shlex.quote(package)}\n")
         if result.returncode != 0:
             raise Z9MonError(
                 "PACKAGE_LOOKUP_FAILED",
@@ -276,7 +269,7 @@ class AdbClient:
         )
 
     def package_pids(self, package: str) -> list[int]:
-        result = self.shell(f"pidof {shlex_quote(package)}\n")
+        result = self.shell(f"pidof {shlex.quote(package)}\n")
         if result.returncode not in (0, 1):
             raise Z9MonError(
                 "PID_LOOKUP_FAILED",
@@ -304,13 +297,6 @@ class AdbClient:
         return parse_uid_processes(result.stdout, uid)
 
     def read_process_maps(self, pid: int) -> str:
-        if pid <= 0:
-            raise Z9MonError(
-                "PID_INVALID",
-                "process ID must be greater than zero",
-                EXIT_DEVICE,
-                {"pid": pid},
-            )
         result = self.root_shell(f"cat /proc/{pid}/maps")
         if result.returncode != 0:
             raise Z9MonError(
@@ -322,7 +308,7 @@ class AdbClient:
         return result.stdout
 
     def force_stop(self, package: str) -> None:
-        result = self.shell(f"am force-stop {shlex_quote(package)}\n")
+        result = self.shell(f"am force-stop {shlex.quote(package)}\n")
         if result.returncode != 0:
             raise Z9MonError(
                 "APP_STOP_FAILED",
@@ -332,7 +318,7 @@ class AdbClient:
             )
 
     def launch_package(self, package: str) -> dict[str, str]:
-        package_arg = shlex_quote(package)
+        package_arg = shlex.quote(package)
         resolved = self.shell(
             f"cmd package resolve-activity --brief --user 0 {package_arg}\n"
         )
@@ -347,7 +333,7 @@ class AdbClient:
                 component = candidates[-1]
 
         if component:
-            result = self.shell(f"am start -n {shlex_quote(component)}\n")
+            result = self.shell(f"am start -n {shlex.quote(component)}\n")
             method = "am-start"
         else:
             result = self.shell(
@@ -366,9 +352,3 @@ class AdbClient:
                 },
             )
         return {"method": method, "component": component}
-
-
-def shlex_quote(value: str) -> str:
-    import shlex
-
-    return shlex.quote(value)

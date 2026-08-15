@@ -111,7 +111,7 @@ def capture_maps_snapshot(
     uid: int,
     maps_dir: Path,
     snapshot_id: str,
-    warnings: list[str],
+    warnings: list[dict[str, Any]],
     only_pids: Iterable[int] | None = None,
     wait_seconds: float = 0.0,
 ) -> dict[str, Any]:
@@ -125,7 +125,13 @@ def capture_maps_snapshot(
         try:
             processes = adb.processes_for_uid(uid)
         except Z9MonError as exc:
-            warnings.append(f"{snapshot_id}: {exc.code}")
+            warnings.append(
+                {
+                    "code": exc.code,
+                    "phase": snapshot_id,
+                    "evidence_valid": True,
+                }
+            )
             process_lookup_failed = True
             break
         if wanted is not None:
@@ -137,7 +143,13 @@ def capture_maps_snapshot(
     try:
         maps_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        warnings.append(f"{snapshot_id}: MAPS_DIRECTORY_FAILED")
+        warnings.append(
+            {
+                "code": "MAPS_DIRECTORY_FAILED",
+                "phase": snapshot_id,
+                "evidence_valid": True,
+            }
+        )
         return {
             "snapshot_id": snapshot_id,
             "captured_at": utc_now(),
@@ -151,10 +163,24 @@ def capture_maps_snapshot(
             raw_path = (maps_dir / f"{snapshot_id}-{process.pid}.maps").resolve()
             raw_path.write_text(raw, encoding="utf-8")
         except Z9MonError as exc:
-            warnings.append(f"{snapshot_id}: pid {process.pid}: {exc.code}")
+            warnings.append(
+                {
+                    "code": exc.code,
+                    "phase": snapshot_id,
+                    "pid": process.pid,
+                    "evidence_valid": True,
+                }
+            )
             continue
         except OSError:
-            warnings.append(f"{snapshot_id}: pid {process.pid}: MAPS_WRITE_FAILED")
+            warnings.append(
+                {
+                    "code": "MAPS_WRITE_FAILED",
+                    "phase": snapshot_id,
+                    "pid": process.pid,
+                    "evidence_valid": True,
+                }
+            )
             continue
         parsed = parse_proc_maps(raw)
         captured_processes.append(
@@ -172,9 +198,23 @@ def capture_maps_snapshot(
     found = {process["pid"] for process in captured_processes}
     if wanted is not None and not process_lookup_failed:
         for pid in sorted(wanted - found):
-            warnings.append(f"{snapshot_id}: pid {pid}: MAPS_UNAVAILABLE")
+            warnings.append(
+                {
+                    "code": "MAPS_UNAVAILABLE",
+                    "phase": snapshot_id,
+                    "pid": pid,
+                    "evidence_valid": True,
+                }
+            )
     elif wanted is None and not processes and not process_lookup_failed:
-        warnings.append(f"{snapshot_id}: no process found for uid {uid}")
+        warnings.append(
+            {
+                "code": "PROCESS_NOT_FOUND",
+                "phase": snapshot_id,
+                "uid": uid,
+                "evidence_valid": True,
+            }
+        )
 
     return {
         "snapshot_id": snapshot_id,

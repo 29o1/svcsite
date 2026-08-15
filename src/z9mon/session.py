@@ -6,11 +6,11 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from z9mon.constants import SESSION_SCHEMA, SUMMARY_SCHEMA
 from z9mon.errors import EXIT_DATA, Z9MonError
-from z9mon.protocol import Event, ParseResult, open_event_stream
+from z9mon.protocol import open_event_stream
 
 
 def utc_now() -> str:
@@ -59,43 +59,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def sequence_quality(events: Iterable[Event]) -> dict[str, int]:
-    gaps = 0
-    missing = 0
-    previous: int | None = None
-    for event in events:
-        if previous is not None:
-            delta = (event.seq - previous) & 0xFFFFFFFF
-            if delta > 1:
-                gaps += 1
-                missing += delta - 1
-        previous = event.seq
-    return {"gaps": gaps, "missing": missing}
-
-
-def build_summary(
-    parsed: ParseResult,
-    syscall_names: Mapping[int, str],
-    *,
-    kernel_dropped: int,
-) -> dict[str, Any]:
-    by_syscall = Counter(
-        syscall_names.get(event.nr, f"sys_{event.nr}") for event in parsed.events
-    )
-    by_pid = Counter(str(event.tgid) for event in parsed.events)
-    by_tid = Counter(str(event.pid) for event in parsed.events)
-    return {
-        "schema_version": SUMMARY_SCHEMA,
-        "event_count": len(parsed.events),
-        "kernel_dropped": kernel_dropped,
-        "sequence": sequence_quality(parsed.events),
-        "parser": parsed.quality(),
-        "by_syscall": dict(sorted(by_syscall.items())),
-        "by_pid": dict(sorted(by_pid.items(), key=lambda item: int(item[0]))),
-        "by_tid": dict(sorted(by_tid.items(), key=lambda item: int(item[0]))),
-    }
 
 
 def summarize_event_file(

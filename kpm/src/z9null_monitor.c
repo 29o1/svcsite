@@ -17,12 +17,12 @@
  *   - ioctl cmd decode (BINDER/TIOCSCTTY/TCGETS etc)
  *   - write/sendto partial data preview (first 64 bytes hex+ascii)
  *   - Larger DESC_BUF for detailed output (1024 bytes)
- *   - Larger event ring buffer (1024 events)
+ *   - Larger event ring buffer (8192 events)
  *
  * Architecture:
- *   - Module load → hook all tier1 syscalls → always monitoring
- *   - APP only controls: which UID, which NRs to log, pause/resume
- *   - Bitmap-based NR filter + UID filter, lock-free
+ *   - Module load → hook all tier1 syscalls → wait disabled
+ *   - CLI controls UID, syscall NR bitmap, and pause/resume
+ *   - Bitmap-based NR filter + UID filter
  *
  * Official KPM API used:
  *   - inline_hook_syscalln(nr, narg, before, after, udata)
@@ -93,8 +93,10 @@ static unsigned long lookup_symbol_log(const char *name)
     return addr;
 }
 
+#define Z9MON_KPM_VERSION "1.4.0"
+
 KPM_NAME("z9null_monitor");
-KPM_VERSION("1.3.0");
+KPM_VERSION(Z9MON_KPM_VERSION);
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Xiaowaaa,z9null");
 KPM_DESCRIPTION("Z9Null Monitor");
@@ -105,7 +107,6 @@ KPM_DESCRIPTION("Z9Null Monitor");
 #define MAX_EVENTS      8192      // 环形缓冲区容量（vmalloc 动态分配，提升爆发期缓冲能力）
 #define MAX_NR          512       // 支持的最大 syscall 号
 #define BITMAP_LONGS    (MAX_NR / 64 + 1) // bitmap 用 unsigned long 数组，每个 64 位
-#define OUTPUT_PATH     "/data/local/tmp/z9null_monitor_out.json" // CTL0 的 JSON 输出写到这个文件
 #define EVENT_PATH      "/data/local/tmp/z9null_monitor_events.bin"
 #define DESC_BUF_SIZE   1024      // 参数描述字符串缓冲区（v8.1 从小 buffer 扩大到 1024）
 #define PATH_BUF_SIZE   1024      // 路径字符串缓冲区
@@ -231,7 +232,6 @@ static kp_sysname_t *g_syscall_name_table = 0;
 static const char *get_syscall_name(int nr)
 {
     if (nr == 435) return "clone3";
-    if (nr == -1) return "do_filp_open";
     if (nr >= 0 && nr < 460 && g_syscall_name_table) {
         const char *n = g_syscall_name_table[nr].name;
         if (n && n[0]) return n;
@@ -242,7 +242,7 @@ static const char *get_syscall_name(int nr)
 }
 
 /* ================================================================
- * Global state — lock-free, volatile for single-writer/multi-reader
+ * Global state
  * ================================================================ */
 static volatile int g_enabled = 0;           // 监控开关，0=暂停，1=启用
 static volatile int g_target_uid = -1;       // UID 过滤，-1=全部，>=0=只监控指定 UID
@@ -308,7 +308,6 @@ typedef struct {
 } svc_event_t;
 
 static svc_event_t *g_events = 0; // 环形缓冲区（动态分配）
-static int g_events_use_vmalloc = 0;
 static void *(*g_vzalloc)(unsigned long size) = 0;
 static void *(*g_vmalloc)(unsigned long size) = 0;
 static void (*g_vfree)(const void *addr) = 0;
@@ -318,23 +317,16 @@ static volatile int g_ev_count = 0;      // 当前缓冲区中的事件数
 static volatile unsigned int g_ev_dropped = 0;
 static volatile int g_ev_lock = 0;
 static volatile int g_hooks_installed = 0;
-static volatile int g_tier2_loaded = 0;
 static volatile int g_active = 0;
 
 static struct task_struct *g_writer_task = 0;
 static volatile int g_writer_stop = 0;
 static volatile int g_event_file_initialized = 0;
-static volatile int g_writer_text_mode = 0;
-static volatile int g_writer_probe_mode = 0;
 
 extern unsigned long (*kallsyms_lookup_name)(const char *name);
-static long (*g_probe_kernel_read)(void *dst, const void *src, unsigned long size) = 0;
 static unsigned long (*g_copy_from_user)(void *to, const void __user *from, unsigned long n) = 0;
 typedef void (*msleep_t)(unsigned int msecs);
 static msleep_t g_msleep = 0;
-
-static unsigned long g_do_filp_open_addr = 0;
-static int g_do_filp_open_active = 0;
 
 struct file;
 typedef long long loff_t;
@@ -450,7 +442,6 @@ static int init_events_storage(void)
     if (g_vzalloc) {
         p = g_vzalloc(bytes);
         if (p) {
-            g_events_use_vmalloc = 1;
             g_events = (svc_event_t *)p;
             return 0;
         }
@@ -459,7 +450,6 @@ static int init_events_storage(void)
     if (g_vmalloc) {
         p = g_vmalloc(bytes);
         if (p) {
-            g_events_use_vmalloc = 1;
             memzero(p, bytes);
             g_events = (svc_event_t *)p;
             return 0;
@@ -479,7 +469,6 @@ static void free_events_storage(void)
     if (!g_events) return;
     if (g_vfree) g_vfree((const void *)g_events);
     g_events = 0;
-    g_events_use_vmalloc = 0;
 }
 
 /* ================================================================
@@ -490,12 +479,6 @@ static void free_events_storage(void)
 {
     if (bit >= 0 && bit < MAX_NR)
         bm[bit / 64] |= (1UL << (bit % 64));
-}
-
-static inline void bitmap_clear(volatile unsigned long *bm, int bit)
-{
-    if (bit >= 0 && bit < MAX_NR)
-        bm[bit / 64] &= ~(1UL << (bit % 64));
 }
 
 static inline int bitmap_test(volatile unsigned long *bm, int bit)
@@ -564,21 +547,6 @@ static unsigned long safe_read_user_ptr(unsigned long uptr)
     if (!is_user_addr(uptr)) return 0;
     if (safe_copy_user_bytes((char *)&val, uptr, 8) != 8) return 0;
     return val;
-}
-
-static void safe_copy_kernel_str(char *dst, unsigned long kptr, int maxlen)
-{
-    int i;
-    if (!dst || maxlen <= 0) return;
-    dst[0] = '\0';
-    if (!g_probe_kernel_read || !kptr) return;
-    for (i = 0; i < maxlen - 1; i++) {
-        char c = 0;
-        if (g_probe_kernel_read(&c, (const void *)(kptr + (unsigned long)i), 1) != 0) break;
-        dst[i] = c;
-        if (c == '\0') return;
-    }
-    dst[maxlen - 1] = '\0';
 }
 
 /* ================================================================
@@ -1887,123 +1855,6 @@ static void before_generic(hook_fargs4_t *args, void *udata)
     push_event(nr, uid, a0, a1, a2, a3, a4, a5, pc, caller, fp, sp, bt_depth, bt, clone_fn, 0, desc);
 }
 
-static void do_filp_open_before(hook_fargs3_t *args, void *udata)
-{
-    int uid;
-    unsigned long pc = 0;
-    unsigned long caller = 0;
-    unsigned long fp = 0;
-    unsigned long sp = 0;
-    unsigned long bt[MAX_BT];
-    unsigned int bt_depth = 0;
-    char pathbuf[PATH_BUF_SIZE];
-    char flagbuf[256];
-    char desc[DESC_BUF_SIZE];
-
-    (void)udata;
-
-    if (!g_enabled) return;
-    uid = (int)current_uid();
-    if (g_target_uid >= 0 && uid != g_target_uid) return;
-    if (!bitmap_test(g_nr_bitmap, 56)) return;
-
-    {
-        struct pt_regs *r = _task_pt_reg(current);
-        if (r) {
-            pc = (unsigned long)r->pc;
-            caller = (unsigned long)r->regs[30];
-            fp = (unsigned long)r->regs[29];
-            sp = (unsigned long)r->sp;
-            memzero(bt, sizeof(bt));
-            bt_depth = unwind_user_fp(r, bt);
-        }
-    }
-
-    pathbuf[0] = '\0';
-    flagbuf[0] = '\0';
-
-    {
-        int dfd = (int)args->arg0;
-        unsigned long filename_ptr = (unsigned long)args->arg1;
-        unsigned long of_ptr = (unsigned long)args->arg2;
-        unsigned long name_ptr = 0;
-        struct open_flags_head {
-            int open_flag;
-            unsigned int mode;
-        } of;
-
-        if (g_probe_kernel_read && filename_ptr) {
-            if (g_probe_kernel_read(&name_ptr, (const void *)filename_ptr, sizeof(name_ptr)) == 0) {
-                safe_copy_kernel_str(pathbuf, name_ptr, sizeof(pathbuf));
-            }
-        }
-
-        if (g_probe_kernel_read && of_ptr) {
-            if (g_probe_kernel_read(&of, (const void *)of_ptr, sizeof(of)) == 0) {
-                decode_open_flags(flagbuf, sizeof(flagbuf), (unsigned long)of.open_flag);
-                snprintf(desc, sizeof(desc),
-                         "dfd=%d path=\"%s\" flags=%s(0x%x) mode=0%o",
-                         dfd, pathbuf[0] ? pathbuf : "?", flagbuf, of.open_flag, of.mode);
-            } else {
-                snprintf(desc, sizeof(desc),
-                         "dfd=%d filename=0x%lx open_flags=0x%lx",
-                         dfd, filename_ptr, of_ptr);
-            }
-        } else {
-            snprintf(desc, sizeof(desc),
-                     "dfd=%d filename=0x%lx open_flags=0x%lx",
-                     dfd, filename_ptr, of_ptr);
-        }
-    }
-
-    push_event(-1, uid,
-               (unsigned long)args->arg0, (unsigned long)args->arg1, (unsigned long)args->arg2,
-               0, 0, 0,
-               pc, caller, fp, sp, bt_depth, bt, 0, 0, desc);
-}
-
-static int install_do_filp_open(void)
-{
-    hook_err_t err;
-    unsigned long addr = 0;
-
-    if (g_do_filp_open_active) return 0;
-    if (!kallsyms_lookup_name) {
-        printk("z9null_monitor: install_do_filp_open failed: kallsyms_lookup_name unavailable\n");
-        return -1;
-    }
-
-    if (!g_probe_kernel_read) {
-        g_probe_kernel_read = (long (*)(void *, const void *, unsigned long))
-            lookup_symbol_log("probe_kernel_read");
-    }
-
-    addr = lookup_symbol_log("do_filp_open.cfi_jt");
-    if (!addr) addr = lookup_symbol_log("do_filp_open");
-    if (!addr) {
-        printk("z9null_monitor: install_do_filp_open failed: do_filp_open symbol unresolved\n");
-        return -1;
-    }
-
-    err = hook_wrap((void *)addr, 3, (void *)do_filp_open_before, (void *)0, (void *)0);
-    if (err != HOOK_NO_ERR) {
-        printk("z9null_monitor: install_do_filp_open hook_wrap failed, addr=%lx err=%d\n", addr, (int)err);
-        return -1;
-    }
-
-    g_do_filp_open_addr = addr;
-    g_do_filp_open_active = 1;
-    return 0;
-}
-
-static void remove_do_filp_open(void)
-{
-    if (!g_do_filp_open_active) return;
-    hook_unwrap((void *)g_do_filp_open_addr, (void *)do_filp_open_before, (void *)0);
-    g_do_filp_open_active = 0;
-    g_do_filp_open_addr = 0;
-}
-
 /* ================================================================
  * Tier1: Core syscalls for reverse engineering (46)
  * ================================================================ */
@@ -2088,8 +1939,6 @@ static hook_entry_t tier2_hooks[] = {
 };
 #define TIER2_COUNT (sizeof(tier2_hooks) / sizeof(tier2_hooks[0]))
 
-static hook_entry_t dyn_hooks[460];
-
 static int install_hook(hook_entry_t *h);
 
 static int is_hooked_nr(int nr)
@@ -2101,7 +1950,6 @@ static int is_hooked_nr(int nr)
     for (i = 0; i < (int)TIER2_COUNT; i++) {
         if (tier2_hooks[i].nr == nr && tier2_hooks[i].active) return 1;
     }
-    if (nr >= 0 && nr < 460 && dyn_hooks[nr].active) return 1;
     return 0;
 }
 
@@ -2331,89 +2179,6 @@ static int install_tier1(void)
     return ok;
 }
 
-static void install_tier2(void)
-{
-    int i;
-    for (i = 0; i < (int)TIER2_COUNT; i++) {
-        install_hook(&tier2_hooks[i]);
-    }
-    g_tier2_loaded = 1;
-}
-
-static void remove_tier2(void)
-{
-    int i;
-    for (i = 0; i < (int)TIER2_COUNT; i++) {
-        remove_hook(&tier2_hooks[i]);
-    }
-    g_tier2_loaded = 0;
-}
-
-/* ================================================================
- * Preset configurations
- * ================================================================ */
-static const int preset_re_basic[] = {56,48,78,221,222,226,198,203,117,167,29,134,279,280};
-static const int preset_re_full[] = {56,48,35,78,79,63,64,221,281,220,435,93,94,222,226,215,232,198,200,203,206,207,117,167,29,25,129,131,134,135,277,280,279,146,144,147,105,273,97,268,261,291};
-static const int preset_file[] = {56,57,48,35,78,79,80,61,63,64,62,34,38,276,53,54,291,43,27,5,8};
-static const int preset_net[] = {198,200,201,202,203,206,207,208,209,210,211,212,242};
-static const int preset_proc[] = {221,281,220,435,93,94,95,260,117,129,130,131,270,271};
-static const int preset_mem[] = {222,226,215,214,232,233,279,270,271};
-static const int preset_security[] = {117,277,280,146,144,147,149,105,273,106,97,268,91,167,134};
-
-static void apply_preset(const char *name)
-{
-    int i;
-    const int *nrs = 0;
-    int cnt = 0;
-    /* Clear bitmap */
-    for (i = 0; i < BITMAP_LONGS; i++)
-        g_nr_bitmap[i] = 0;
-
-    if (!strcmp(name, "re_basic")) {
-        nrs = preset_re_basic;
-        cnt = (int)(sizeof(preset_re_basic) / sizeof(preset_re_basic[0]));
-    }
-    else if (!strcmp(name, "re_full")) {
-        nrs = preset_re_full;
-        cnt = (int)(sizeof(preset_re_full) / sizeof(preset_re_full[0]));
-    }
-    else if (!strcmp(name, "file")) {
-        nrs = preset_file;
-        cnt = (int)(sizeof(preset_file) / sizeof(preset_file[0]));
-    }
-    else if (!strcmp(name, "net")) {
-        nrs = preset_net;
-        cnt = (int)(sizeof(preset_net) / sizeof(preset_net[0]));
-    }
-    else if (!strcmp(name, "proc")) {
-        nrs = preset_proc;
-        cnt = (int)(sizeof(preset_proc) / sizeof(preset_proc[0]));
-    }
-    else if (!strcmp(name, "mem")) {
-        nrs = preset_mem;
-        cnt = (int)(sizeof(preset_mem) / sizeof(preset_mem[0]));
-    }
-    else if (!strcmp(name, "security")) {
-        nrs = preset_security;
-        cnt = (int)(sizeof(preset_security) / sizeof(preset_security[0]));
-    }
-    else if (!strcmp(name, "all")) {
-        /* Enable all hooked NRs */
-        for (i = 0; i < (int)TIER1_COUNT; i++)
-            if (tier1_hooks[i].active)
-                bitmap_set(g_nr_bitmap, tier1_hooks[i].nr);
-        for (i = 0; i < (int)TIER2_COUNT; i++)
-            if (tier2_hooks[i].active)
-                bitmap_set(g_nr_bitmap, tier2_hooks[i].nr);
-    }
-    if (nrs && cnt > 0) {
-        for (i = 0; i < cnt; i++) {
-            if (is_hooked_nr(nrs[i]))
-                bitmap_set(g_nr_bitmap, nrs[i]);
-        }
-    }
-}
-
 /* ================================================================
  * Integer parser helper
  * ================================================================ */
@@ -2429,168 +2194,9 @@ static int parse_int(const char *s, int *consumed)
     return neg ? -val : val;
 }
 
-/* ================================================================
- * JSON output via file (kernel file write)
- * ================================================================ */
-static int write_output_file(const char *data, int len)
-{
-    loff_t pos = 0;
-    struct file *fp;
-    if (!data || len <= 0) return -1;
-    if (!kallsyms_lookup_name) {
-        printk("z9null_monitor: write_output_file failed: kallsyms_lookup_name unavailable\n");
-        return -1;
-    }
-
-    if (!g_filp_open)
-        g_filp_open = (typeof(g_filp_open))lookup_symbol_log("filp_open");
-    if (!g_filp_close)
-        g_filp_close = (typeof(g_filp_close))lookup_symbol_log("filp_close");
-    if (!g_kernel_write) {
-        g_kernel_write = (typeof(g_kernel_write))lookup_symbol_log("kernel_write");
-        if (!g_kernel_write)
-            g_kernel_write = (typeof(g_kernel_write))lookup_symbol_log("__kernel_write");
-    }
-
-    if (!g_filp_open || !g_filp_close || !g_kernel_write) {
-        printk("z9null_monitor: write_output_file failed: filp_open=%lx filp_close=%lx kernel_write=%lx\n",
-               (unsigned long)g_filp_open,
-               (unsigned long)g_filp_close,
-               (unsigned long)g_kernel_write);
-        return -1;
-    }
-
-    fp = g_filp_open(OUTPUT_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (!fp || IS_ERR(fp)) return -1;
-    g_kernel_write(fp, data, (unsigned long)len, &pos);
-    g_filp_close(fp, 0);
-    return 0;
-}
-
-static int write_event_test_file(void)
-{
-    static const char test_data[] = "svcmon_test\n";
-    loff_t off = 0;
-    long rc;
-    struct file *fp;
-
-    if (!kallsyms_lookup_name) {
-        printk("z9null_monitor: write_event_test_file failed: kallsyms_lookup_name unavailable\n");
-        return -1;
-    }
-    if (!g_filp_open)
-        g_filp_open = (typeof(g_filp_open))lookup_symbol_log("filp_open");
-    if (!g_filp_close)
-        g_filp_close = (typeof(g_filp_close))lookup_symbol_log("filp_close");
-    if (!g_kernel_write) {
-        g_kernel_write = (typeof(g_kernel_write))lookup_symbol_log("kernel_write");
-        if (!g_kernel_write)
-            g_kernel_write = (typeof(g_kernel_write))lookup_symbol_log("__kernel_write");
-    }
-    if (!g_filp_open || !g_filp_close || !g_kernel_write) {
-        printk("z9null_monitor: write_event_test_file failed: filp_open=%lx filp_close=%lx kernel_write=%lx\n",
-               (unsigned long)g_filp_open,
-               (unsigned long)g_filp_close,
-               (unsigned long)g_kernel_write);
-        return -1;
-    }
-
-    set_priv_selinux_allow_if_needed(1);
-    fp = g_filp_open(EVENT_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (!fp || IS_ERR(fp)) {
-        printk("z9null_monitor: write_event_test_file open failed err=%ld\n", (long)fp);
-        set_priv_selinux_allow_if_needed(0);
-        return -1;
-    }
-
-    rc = g_kernel_write(fp, test_data, (unsigned long)(sizeof(test_data) - 1), &off);
-    printk("z9null_monitor: write_event_test_file rc=%ld off=%lld len=%d\n",
-           rc, (long long)off, (int)(sizeof(test_data) - 1));
-    g_filp_close(fp, 0);
-    set_priv_selinux_allow_if_needed(0);
-
-    if (rc <= 0 || off != (loff_t)(sizeof(test_data) - 1)) {
-        return -1;
-    }
-    return 0;
-}
-
-static int write_writer_probe_file_once(void)
-{
-    static const char probe_data[] = "writer_alive\n";
-    loff_t off = 0;
-    long rc;
-    struct file *fp;
-
-    if (!g_filp_open)
-        g_filp_open = (typeof(g_filp_open))lookup_symbol_log("filp_open");
-    if (!g_filp_close)
-        g_filp_close = (typeof(g_filp_close))lookup_symbol_log("filp_close");
-    if (!g_kernel_write) {
-        g_kernel_write = (typeof(g_kernel_write))lookup_symbol_log("kernel_write");
-        if (!g_kernel_write)
-            g_kernel_write = (typeof(g_kernel_write))lookup_symbol_log("__kernel_write");
-    }
-    if (!g_filp_open || !g_filp_close || !g_kernel_write) {
-        printk("z9null_monitor: write_writer_probe_file_once missing helpers filp_open=%lx filp_close=%lx kernel_write=%lx\n",
-               (unsigned long)g_filp_open,
-               (unsigned long)g_filp_close,
-               (unsigned long)g_kernel_write);
-        return -1;
-    }
-
-    set_priv_selinux_allow_if_needed(1);
-    fp = g_filp_open(EVENT_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (!fp || IS_ERR(fp)) {
-        printk("z9null_monitor: write_writer_probe_file_once open failed err=%ld\n", (long)fp);
-        set_priv_selinux_allow_if_needed(0);
-        return -1;
-    }
-
-    rc = g_kernel_write(fp, probe_data, (unsigned long)(sizeof(probe_data) - 1), &off);
-    if (rc <= 0 || rc != (long)(sizeof(probe_data) - 1)) {
-        printk("z9null_monitor: write_writer_probe_file_once kernel_write rc=%ld off=%lld len=%d\n",
-               rc, (long long)off, (int)(sizeof(probe_data) - 1));
-        g_filp_close(fp, 0);
-        set_priv_selinux_allow_if_needed(0);
-        return -1;
-    }
-
-    g_filp_close(fp, 0);
-    set_priv_selinux_allow_if_needed(0);
-    return 0;
-}
-
-/* Buffer for building JSON output */
-static char g_outbuf[131072];  /* 128KB for detailed event output */
+/* Control response and binary record buffers. */
+static char g_outbuf[4096];
 static unsigned char g_bin_line[2048];
-
-/* JSON escape */
-static int json_escape(char *dst, int dstlen, const char *src)
-{
-    int i = 0;
-    while (*src && i < dstlen - 2) {
-        if (*src == '"' || *src == '\\') {
-            dst[i++] = '\\';
-            if (i >= dstlen - 1) break;
-        }
-        if (*src == '\n') {
-            dst[i++] = '\\'; if (i >= dstlen - 1) break;
-            dst[i++] = 'n';
-        } else if (*src == '\r') {
-dst[i++] = '\\'; if (i >= dstlen - 1) break;
-            dst[i++] = 'r';
-        } else if (*src == '\t') {
-            dst[i++] = '\\'; if (i >= dstlen - 1) break;
-            dst[i++] = 't';
-        } else {
-            dst[i++] = *src;
-        }
-        src++;
-    }
-    dst[i] = '\0';
-    return i;
-}
 
 static int copy_event_locked(svc_event_t *out, int idx)
 {
@@ -2642,47 +2248,6 @@ static int consume_peeked_event(unsigned int seq)
     }
     ev_unlock();
     return ok;
-}
-
-static int format_event_jsonl(char *buf, int blen, const svc_event_t *ev)
-{
-    char esc_desc[DESC_BUF_SIZE + 256];
-    char btbuf[512];
-    int bn = 0;
-    int i;
-    if (!buf || blen <= 0 || !ev) return 0;
-    json_escape(esc_desc, sizeof(esc_desc), ev->desc);
-
-    bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, "[");
-    for (i = 0; i < (int)ev->bt_depth && i < MAX_BT && bn < (int)sizeof(btbuf) - 2; i++) {
-        if (i > 0) bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, ",");
-        bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, "%lu", ev->bt[i]);
-    }
-    bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, "]");
-
-    return snprintf(
-        buf, blen,
-        "{\"seq\":%u,\"nr\":%d,\"name\":\"%s\",\"pid\":%d,\"uid\":%d,"
-        "\"comm\":\"%s\",\"pc\":%lu,\"caller\":%lu,\"fp\":%lu,\"sp\":%lu,\"bt\":%s,\"clone_fn\":%lu,"
-        "\"a0\":%lu,\"a1\":%lu,\"a2\":%lu,\"a3\":%lu,\"a4\":%lu,\"a5\":%lu,"
-        "\"desc\":\"%s\"}\n",
-        ev->seq, ev->nr, get_syscall_name(ev->nr),
-        ev->pid, ev->uid, ev->comm,
-        ev->pc, ev->caller, ev->fp, ev->sp, btbuf, ev->clone_fn,
-        ev->a0, ev->a1, ev->a2, ev->a3, ev->a4, ev->a5,
-        esc_desc
-    );
-}
-
-static int format_event_text(char *buf, int blen, const svc_event_t *ev)
-{
-    if (!buf || blen <= 0 || !ev) return 0;
-    return snprintf(
-        buf, blen,
-        "seq=%u nr=%d name=%s pid=%d tgid=%d uid=%d ret=%ld comm=%s\n",
-        ev->seq, ev->nr, get_syscall_name(ev->nr),
-        ev->pid, ev->tgid, ev->uid, ev->ret, ev->comm
-    );
 }
 
 static int put_u16(unsigned char *buf, int blen, int *off, unsigned int v)
@@ -2819,14 +2384,6 @@ static int event_writer_thread(void *data)
         int wrote = 0;
         int i;
 
-        if (g_writer_probe_mode) {
-            if (write_writer_probe_file_once() == 0) {
-                wrote = 1;
-            }
-            if (g_msleep) g_msleep(wrote ? 1000 : 1500);
-            continue;
-        }
-
         /*
          * Disabling monitoring stops producers, but buffered events still need
          * to reach EVENT_PATH before a host-side capture pulls the file.
@@ -2863,33 +2420,11 @@ static int event_writer_thread(void *data)
                 if (p > 0) pos = (loff_t)p;
             }
             if (pos < 0) pos = 0;
-            if (g_writer_probe_mode) {
-                static const char probe_line[] = "probe\n";
-                long rc = g_kernel_write(fp, probe_line, (unsigned long)(sizeof(probe_line) - 1), &pos);
-                if (rc <= 0 || rc != (long)(sizeof(probe_line) - 1)) {
-                    printk("z9null_monitor: writer_probe kernel_write failed rc=%ld pos=%lld\n",
-                           rc, (long long)pos);
-                    g_filp_close(fp, 0);
-                    fp = 0;
-                } else {
-                    wrote++;
-                }
-            }
             for (i = 0; i < 256; i++) {
                 svc_event_t ev;
                 int len;
                 if (!peek_event(&ev)) break;
-                if (g_writer_text_mode) {
-                    static const char tick_line[] = "tick\n";
-                    len = (int)(sizeof(tick_line) - 1);
-                    if (len > (int)sizeof(g_bin_line)) len = (int)sizeof(g_bin_line);
-                    {
-                        int ti;
-                        for (ti = 0; ti < len; ti++) g_bin_line[ti] = (unsigned char)tick_line[ti];
-                    }
-                } else {
-                    len = format_event_bin(g_bin_line, sizeof(g_bin_line), &ev);
-                }
+                len = format_event_bin(g_bin_line, sizeof(g_bin_line), &ev);
                 if (len > 0) {
                     long rc = g_kernel_write(fp, g_bin_line, (unsigned long)len, &pos);
                     if (rc <= 0 || rc != len) {
@@ -3015,7 +2550,6 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
     int n = 0;
     char *buf = g_outbuf;
     int blen = sizeof(g_outbuf);
-    char esc[DESC_BUF_SIZE + 256];
 
     /* ---- status ---- */
     if (!strcmp(args, "status")) {
@@ -3024,17 +2558,17 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
             if (bitmap_test(g_nr_bitmap, i)) nr_logging++;
         }
         n = snprintf(buf, blen,
-            "{\"ok\":true,\"version\":\"1.3.0\",\"enabled\":%s,"
+            "{\"ok\":true,\"version\":\"%s\",\"enabled\":%s,"
             "\"target_uid\":%d,\"hooks_installed\":%d,"
-            "\"nrs_logging\":%d,\"events_total\":%d,"
-            "\"events_buffered\":%d,\"events_dropped\":%u,\"tier2\":%s,"
+            "\"nrs_logging\":%d,\"events_total\":%u,"
+            "\"events_buffered\":%d,\"events_dropped\":%u,"
             "\"logging_nrs\":[",
+            Z9MON_KPM_VERSION,
             g_enabled ? "true" : "false",
             g_target_uid, g_hooks_installed,
             nr_logging, g_total,
             g_ev_count < MAX_EVENTS ? g_ev_count : MAX_EVENTS,
-            g_ev_dropped,
-            g_tier2_loaded ? "true" : "false");
+            g_ev_dropped);
 
         int first = 1;
         for (i = 0; i < MAX_NR; i++) {
@@ -3043,54 +2577,6 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
                 n += snprintf(buf + n, blen - n, "%d", i);
                 first = 0;
             }
-        }
-        n += snprintf(buf + n, blen - n, "],\"hooks\":[");
-
-        first = 1;
-        for (i = 0; i < (int)TIER1_COUNT; i++) {
-            if (tier1_hooks[i].active) {
-                if (!first) n += snprintf(buf + n, blen - n, ",");
-                n += snprintf(buf + n, blen - n, "{\"nr\":%d,\"name\":\"%s\",\"method\":\"%s\"}",
-                    tier1_hooks[i].nr, get_syscall_name(tier1_hooks[i].nr),
-                    tier1_hooks[i].method == HOOK_INLINE ? "inline" : "fp");
-                first = 0;
-            }
-        }
-        for (i = 0; i < (int)TIER2_COUNT; i++) {
-            if (tier2_hooks[i].active) {
-                if (!first) n += snprintf(buf + n, blen - n, ",");
-                n += snprintf(buf + n, blen - n, "{\"nr\":%d,\"name\":\"%s\",\"method\":\"%s\"}",
-                    tier2_hooks[i].nr, get_syscall_name(tier2_hooks[i].nr),
-                    tier2_hooks[i].method == HOOK_INLINE ? "inline" : "fp");
-                first = 0;
-            }
-        }
-        for (i = 0; i < 460; i++) {
-            if (dyn_hooks[i].active) {
-                if (!first) n += snprintf(buf + n, blen - n, ",");
-                n += snprintf(buf + n, blen - n, "{\"nr\":%d,\"name\":\"%s\",\"method\":\"%s\"}",
-                    dyn_hooks[i].nr, get_syscall_name(dyn_hooks[i].nr),
-                    dyn_hooks[i].method == HOOK_INLINE ? "inline" : "fp");
-                first = 0;
-            }
-        }
-        if (g_do_filp_open_active) {
-            if (!first) n += snprintf(buf + n, blen - n, ",");
-            n += snprintf(buf + n, blen - n, "{\"nr\":-1,\"name\":\"do_filp_open\",\"method\":\"inline\"}");
-            first = 0;
-        }
-        n += snprintf(buf + n, blen - n, "]}");
-    }
-
-    /* ---- sysnames ---- */
-    else if (!strcmp(args, "sysnames")) {
-        int i;
-        n = snprintf(buf, blen, "{\"ok\":true,\"sysnames\":[");
-        for (i = 0; i < 460; i++) {
-            const char *nm = get_syscall_name(i);
-            if (nm && !strncmp(nm, "sys_", 4)) nm += 4;
-            if (i) n += snprintf(buf + n, blen - n, ",");
-            n += snprintf(buf + n, blen - n, "{\"nr\":%d,\"name\":\"%s\"}", i, nm ? nm : "");
         }
         n += snprintf(buf + n, blen - n, "]}");
     }
@@ -3119,33 +2605,15 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
     }
 
     /* ---- enable ---- */
-    else if (!strcmp(args, "enable") || !strcmp(args, "resume") || !strcmp(args, "start")) {
+    else if (!strcmp(args, "enable")) {
         g_enabled = 1;
         n = snprintf(buf, blen, "{\"ok\":true,\"enabled\":true}");
     }
 
     /* ---- disable ---- */
-    else if (!strcmp(args, "disable") || !strcmp(args, "pause") || !strcmp(args, "stop")) {
+    else if (!strcmp(args, "disable")) {
         g_enabled = 0;
         n = snprintf(buf, blen, "{\"ok\":true,\"enabled\":false}");
-    }
-
-    /* ---- enable_nr <n> ---- */
-    else if (!strncmp(args, "enable_nr ", 10)) {
-        int nr = parse_int(args + 10, 0);
-        if (ensure_hooked_nr(nr)) {
-            bitmap_set(g_nr_bitmap, nr);
-            n = snprintf(buf, blen, "{\"ok\":true,\"enabled_nr\":%d}", nr);
-        } else {
-            n = snprintf(buf, blen, "{\"ok\":false,\"error\":\"nr_hook_failed\",\"nr\":%d}", nr);
-        }
-    }
-
-    /* ---- disable_nr <n> ---- */
-    else if (!strncmp(args, "disable_nr ", 11)) {
-        int nr = parse_int(args + 11, 0);
-        bitmap_clear(g_nr_bitmap, nr);
-        n = snprintf(buf, blen, "{\"ok\":true,\"disabled_nr\":%d}", nr);
     }
 
     /* ---- set_nrs <n1>,<n2>,... ---- */
@@ -3176,144 +2644,6 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
         n = snprintf(buf, blen, "{\"ok\":true,\"set_nrs_count\":%d,\"skipped\":%d}", cnt, skip);
     }
 
-    /* ---- enable_all ---- */
-    else if (!strcmp(args, "enable_all")) {
-        int i;
-        for (i = 0; i < (int)TIER1_COUNT; i++)
-            if (tier1_hooks[i].active) bitmap_set(g_nr_bitmap, tier1_hooks[i].nr);
-        for (i = 0; i < (int)TIER2_COUNT; i++)
-            if (tier2_hooks[i].active) bitmap_set(g_nr_bitmap, tier2_hooks[i].nr);
-        for (i = 0; i < 460; i++)
-            if (dyn_hooks[i].active) bitmap_set(g_nr_bitmap, dyn_hooks[i].nr);
-        n = snprintf(buf, blen, "{\"ok\":true}");
-    }
-
-    /* ---- disable_all ---- */
-    else if (!strcmp(args, "disable_all")) {
-        int i;
-        for (i = 0; i < BITMAP_LONGS; i++)
-            g_nr_bitmap[i] = 0;
-        n = snprintf(buf, blen, "{\"ok\":true}");
-    }
-
-    /* ---- preset <name> ---- */
-    else if (!strncmp(args, "preset ", 7)) {
-        apply_preset(args + 7);
-        n = snprintf(buf, blen, "{\"ok\":true,\"preset\":\"%s\"}", args + 7);
-    }
-
-    /* ---- tier2 on/off ---- */
-    else if (!strcmp(args, "tier2 on")) {
-        if (!g_tier2_loaded) install_tier2();
-        n = snprintf(buf, blen, "{\"ok\":true,\"tier2\":true}");
-    }
-    else if (!strcmp(args, "tier2 off")) {
-        if (g_tier2_loaded) remove_tier2();
-        n = snprintf(buf, blen, "{\"ok\":true,\"tier2\":false}");
-    }
-
-    /* ---- do_filp_open on/off ---- */
-    else if (!strcmp(args, "do_filp_open on") || !strcmp(args, "filp_open on")) {
-        if (!g_do_filp_open_active) install_do_filp_open();
-        n = snprintf(buf, blen, "{\"ok\":true,\"do_filp_open\":%s}", g_do_filp_open_active ? "true" : "false");
-    }
-    else if (!strcmp(args, "do_filp_open off") || !strcmp(args, "filp_open off")) {
-        remove_do_filp_open();
-        n = snprintf(buf, blen, "{\"ok\":true,\"do_filp_open\":false}");
-    }
-
-    /* ---- writer_mode text/bin ---- */
-    else if (!strcmp(args, "writer_mode text") || !strcmp(args, "writer_text")) {
-        g_writer_text_mode = 1;
-        n = snprintf(buf, blen, "{\"ok\":true,\"writer_mode\":\"text\"}");
-    }
-    else if (!strcmp(args, "writer_mode bin") || !strcmp(args, "writer_bin")) {
-        g_writer_text_mode = 0;
-        n = snprintf(buf, blen, "{\"ok\":true,\"writer_mode\":\"bin\"}");
-    }
-    else if (!strcmp(args, "writer_probe on") || !strcmp(args, "writer_probe_on")) {
-        g_writer_probe_mode = 1;
-        n = snprintf(buf, blen, "{\"ok\":true,\"writer_probe\":true}");
-    }
-    else if (!strcmp(args, "writer_probe off") || !strcmp(args, "writer_probe_off")) {
-        g_writer_probe_mode = 0;
-        n = snprintf(buf, blen, "{\"ok\":true,\"writer_probe\":false}");
-    }
-
-    /* ---- write_test ---- */
-    else if (!strcmp(args, "write_test")) {
-        int rc = write_event_test_file();
-        n = snprintf(buf, blen, "{\"ok\":%s,\"write_test\":%s}",
-                     rc == 0 ? "true" : "false",
-                     rc == 0 ? "true" : "false");
-    }
-
-    /* ---- drain <max> ---- */
-    else if (!strncmp(args, "drain ", 6) || !strcmp(args, "drain")) {
-        int max = 50;
-        if (!strncmp(args, "drain ", 6)) max = parse_int(args + 6, 0);
-        if (max <= 0) max = 50;
-        if (max > MAX_EVENTS) max = MAX_EVENTS;
-
-        if (!g_events) {
-            n = snprintf(buf, blen, "{\"ok\":false,\"error\":\"no_events_storage\"}");
-        } else {
-            int avail = g_ev_count < MAX_EVENTS ? g_ev_count : MAX_EVENTS;
-            int count = avail < max ? avail : max;
-            int start;
-
-            n = snprintf(buf, blen, "{\"ok\":true,\"count\":%d,\"total\":%u,\"events\":[", count, g_total);
-
-            if (count > 0) {
-                start = (g_ev_head - avail + MAX_EVENTS) % MAX_EVENTS;
-                int skip = avail - count;
-                start = (start + skip) % MAX_EVENTS;
-
-                int i;
-                for (i = 0; i < count && n < blen - 2048; i++) {
-                    int idx = (start + i) % MAX_EVENTS;
-                    svc_event_t *ev = &g_events[idx];
-                    json_escape(esc, sizeof(esc), ev->desc);
-                {
-                    char btbuf[512];
-                    int bn = 0;
-                    int bi;
-                    bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, "[");
-                    for (bi = 0; bi < (int)ev->bt_depth && bi < MAX_BT && bn < (int)sizeof(btbuf) - 2; bi++) {
-                        if (bi > 0) bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, ",");
-                        bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, "%lu", ev->bt[bi]);
-                    }
-                    bn += snprintf(btbuf + bn, sizeof(btbuf) - bn, "]");
-
-                    if (i > 0) n += snprintf(buf + n, blen - n, ",");
-                    n += snprintf(buf + n, blen - n,
-                        "{\"seq\":%u,\"nr\":%d,\"name\":\"%s\",\"tgid\":%d,\"pid\":%d,\"uid\":%d,"
-                        "\"comm\":\"%s\",\"pc\":%lu,\"caller\":%lu,\"fp\":%lu,\"sp\":%lu,\"bt\":%s,\"clone_fn\":%lu,\"ret\":%lu,"
-                        "\"a0\":%lu,\"a1\":%lu,\"a2\":%lu,"
-                        "\"a3\":%lu,\"a4\":%lu,\"a5\":%lu,\"desc\":\"%s\"}",
-                        ev->seq, ev->nr, get_syscall_name(ev->nr), ev->tgid, ev->pid, ev->uid,
-                        ev->comm, ev->pc, ev->caller, ev->fp, ev->sp, btbuf, ev->clone_fn, ev->ret,
-                        ev->a0, ev->a1, ev->a2,
-                        ev->a3, ev->a4, ev->a5, esc);
-                }
-                }
-            }
-            n += snprintf(buf + n, blen - n, "]}");
-
-            ev_lock();
-            g_ev_head = 0;
-            g_ev_tail = 0;
-            g_ev_count = 0;
-            g_ev_dropped = 0;
-            ev_unlock();
-        }
-    }
-
-    /* ---- events ---- */
-    else if (!strcmp(args, "events")) {
-        return svc_ctl0("drain 50", out_msg, outlen);
-    }
-
     /* ---- clear ---- */
     else if (!strcmp(args, "clear")) {
         ev_lock();
@@ -3321,6 +2651,8 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
         g_ev_tail = 0;
         g_ev_count = 0;
         g_ev_dropped = 0;
+        g_seq = 0;
+        g_total = 0;
         ev_unlock();
         n = snprintf(buf, blen, "{\"ok\":true,\"cleared\":true}");
     }
@@ -3330,12 +2662,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
         n = snprintf(buf, blen, "{\"ok\":false,\"error\":\"unknown command: %s\"}", args);
     }
 
-    /* Write to output file */
-    if (n > 0) {
-        write_output_file(buf, n);
-    }
-
-    /* Also copy to out_msg if possible */
+    /* Return the JSON response through KernelPatch ctl0. */
     if (out_msg && outlen > 0) {
         int copy = n < outlen - 1 ? n : outlen - 1;
         if (copy > 0) {
@@ -3352,8 +2679,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
 static long svc_init(const char *args, const char *event, void *__user reserved)
 {
     int ok;
-    int i;
-    printk("z9null_monitor v1.0.0: init, installing hooks...\n");
+    printk("z9null_monitor v%s: init, installing hooks...\n", Z9MON_KPM_VERSION);
 
     g_enabled = 0;
     g_target_uid = -1;
@@ -3364,15 +2690,7 @@ static long svc_init(const char *args, const char *event, void *__user reserved)
     g_seq = 0;
     g_total = 0;
     g_hooks_installed = 0;
-    g_tier2_loaded = 0;
     g_active = 0;
-
-    for (i = 0; i < 460; i++) {
-        dyn_hooks[i].nr = i;
-        dyn_hooks[i].narg = 6;
-        dyn_hooks[i].active = 0;
-        dyn_hooks[i].method = 0;
-    }
 
     if (init_events_storage() != 0) {
         printk("z9null_monitor: init_events_storage failed\n");
@@ -3389,12 +2707,6 @@ static long svc_init(const char *args, const char *event, void *__user reserved)
     ok = install_tier1();
     printk("z9null_monitor: tier1 installed %d/%d hooks\n", ok, (int)TIER1_COUNT);
 
-    if (install_do_filp_open() == 0) {
-        printk("z9null_monitor: do_filp_open hook installed\n");
-    } else {
-        printk("z9null_monitor: do_filp_open hook install failed\n");
-    }
-
     printk("z9null_monitor: ready, g_enabled=0 (waiting for APP)\n");
     return 0;
 }
@@ -3409,17 +2721,8 @@ static long svc_exit(void *__user reserved)
 
     stop_writer_thread();
 
-    remove_do_filp_open();
-
-    if (g_tier2_loaded) {
-        for (i = 0; i < (int)TIER2_COUNT; i++)
-            remove_hook(&tier2_hooks[i]);
-        g_tier2_loaded = 0;
-    }
-
-    for (i = 0; i < 460; i++) {
-        if (dyn_hooks[i].active) remove_hook(&dyn_hooks[i]);
-    }
+    for (i = 0; i < (int)TIER2_COUNT; i++)
+        remove_hook(&tier2_hooks[i]);
 
     for (i = 0; i < (int)TIER1_COUNT; i++)
         remove_hook(&tier1_hooks[i]);

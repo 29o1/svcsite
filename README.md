@@ -85,8 +85,7 @@ z9mon capture \
   --device SERIAL \
   --package io.example.target \
   --duration 15 \
-  --preset reverse-basic \
-  --launch \
+  --target-mode launch \
   --output ./captures \
   --load-module ./kpm/z9null_monitor.kpm \
   --json
@@ -102,17 +101,22 @@ z9mon capture \
   --device SERIAL \
   --package io.example.target \
   --duration 15 \
-  --preset reverse-basic \
-  --restart \
+  --target-mode restart \
   --output ./captures \
   --json
 ```
 
-`--launch` 启动目标但不先清理状态；`--restart` 会先 `force-stop` 再启动，
-不会清除 App 数据。KPM 按目标 UID 采集，因此同 UID 的进程都会进入原始
-session，随后可按 PID/TID 查询。
+`--target-mode attach`（默认）不修改 App 生命周期；`launch` 启动目标但不先
+清理状态；`restart` 会先 `force-stop` 再启动，不会清除 App 数据。KPM 按目标
+UID 采集，因此同 UID 的进程都会进入原始 session，随后可按 PID/TID 查询。
 
-自定义 syscall 会覆盖 preset，可重复或使用逗号分隔：
+从 v0.7.0 起，生命周期参数统一为 `--target-mode`，查询形态统一为
+`--mode events|stats|callsites`；默认 syscall 集合不再需要显式 preset。旧参数
+`--launch`、`--restart`、`--stats`、`--callsite-stats` 和 `--preset` 已移除，避免
+Agent 组合出互相冲突的状态。
+
+不提供 `--syscall` 时使用 `reverse-basic` 集合。自定义 syscall 可重复或使用
+逗号分隔：
 
 ```bash
 z9mon capture \
@@ -146,7 +150,7 @@ PID，还会尝试生成 recovery 快照。maps 获取失败只记录 warning，
 查询不会修改设备状态：
 
 ```bash
-z9mon query ./captures/SESSION_ID --stats --json
+z9mon query ./captures/SESSION_ID --mode stats --json
 z9mon query ./captures/SESSION_ID \
   --syscall openat,read \
   --contains /proc/ \
@@ -158,13 +162,13 @@ z9mon query ./captures/SESSION_ID \
   --format jsonl
 
 z9mon query ./captures/SESSION_ID \
-  --callsite-stats \
+  --mode callsites \
   --limit 20 \
   --json
 
 z9mon query ./captures/SESSION_ID \
   --module-id 'file:DEVICE:INODE:/absolute/device/path/libtarget.so' \
-  --callsite-stats \
+  --mode callsites \
   --limit 20 \
   --json
 
@@ -181,12 +185,13 @@ z9mon address resolve ./captures/SESSION_ID \
 运行时地址归一化（`module`、`module_id`、`module_base`、`module_offset`）。
 `module` 是适合展示的 basename；`module_id` 组合完整规范化路径、设备号和
 inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modules.json`
-缺少该字段时会在查询阶段自动推导。v0.6.0 不拉取 ELF，也不提供符号名或源码
+缺少该字段时会在查询阶段自动推导。v0.7.0 不拉取 ELF，也不提供符号名或源码
 行信息；旧 session 没有 `modules.json` 时仍可查询。
 
-`--module-id` 使用唯一模块标识筛选包含该模块调用点的事件；
-`--callsite-stats` 不返回事件明细，而是按 syscall、模块和模块内偏移聚合唯一
-调用点，适合直接交给 Agent 或静态分析工具继续处理。
+`--module-id` 使用唯一模块标识筛选包含该模块调用点的事件。`--mode stats`
+返回 syscall、PID 和有界模块排名，便于 Agent 发现目标 `module_id`；
+`--mode callsites` 按 syscall、模块和模块内偏移聚合唯一调用点，适合交给静态
+分析工具继续处理。
 
 `caller` 和 FP-chain 中的地址是 ARM64 返回地址。查询保留这些原始证据，
 并额外输出 `caller_callsite`、`backtrace_callsites` 及对应的 resolved 字段，
@@ -194,8 +199,10 @@ inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modul
 重复包含 PC；该位置的 callsite 返回 `null`，避免错误执行 `PC - 4`。
 
 `--json` 模式下 stdout 只包含一个紧凑 JSON 对象。诊断信息写入 stderr，
-并使用稳定的错误代码和进程退出码。capture warning 位于结果信封顶层；重复
-的短生命周期 PID maps warning 会聚合，完整明细仍保存在 `manifest.json`。
+并使用稳定的错误代码和进程退出码。capture warning 位于结果信封顶层并使用
+结构化 `code`、`phase`、PID 等字段；重复的短生命周期 PID maps warning 会
+聚合，完整明细仍保存在 `manifest.json`。
+`--format jsonl` 仅用于导出 events，不能与 `--json` 或聚合查询模式组合。
 
 ## 构建 KPM
 
@@ -211,6 +218,10 @@ make kpm
 make kpm KP_DIR=/absolute/path/to/KernelPatch
 ```
 
+KPM v1.4.0 只保留 CLI 实际使用的控制命令和 binary v2 writer。CLI v0.7.0 仍可
+读取设备上已加载的旧 KPM 状态并执行兼容采集；模块替换依旧只在显式传入
+`--load-module` 时发生。
+
 ## 验证
 
 ```bash
@@ -223,8 +234,7 @@ make check
 z9mon capture \
   --package TARGET \
   --duration 15 \
-  --preset reverse-basic \
-  --launch \
+  --target-mode launch \
   --output ./captures \
   --json
 ```

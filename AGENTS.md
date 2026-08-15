@@ -29,11 +29,11 @@ LLM.
 - A capture must finish with monitoring disabled and `events_buffered == 0`.
 - Capture maps for every process under the target UID after launch and before
   stop. Maps failures are warnings and must not invalidate syscall evidence.
-- Prefer `query --stats` or a narrow `query --limit N` over reading
+- Prefer `query --mode stats` or a narrow `query --limit N` over reading
   `events.bin` directly.
 - Query defaults to compact address details and 20 events. Use
   `--detail full` only when mapping bounds and permissions are required.
-- Use `query --module-id MODULE_ID --callsite-stats` to rank unique syscall
+- Use `query --mode callsites --module-id MODULE_ID` to rank unique syscall
   callsites for one exact mapped binary.
 - Preserve raw runtime addresses. Resolved module/base/offset fields are
   additive, and sessions without `modules.json` remain queryable.
@@ -69,8 +69,7 @@ PYTHONPATH=src python3 -m z9mon capture \
   --device SERIAL \
   --package TARGET \
   --duration 15 \
-  --preset reverse-basic \
-  --launch \
+  --target-mode launch \
   --output ./captures \
   --json
 ```
