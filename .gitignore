@@ -23,4 +23,5 @@ dist/
 
 artifacts/
 captures/
+bench/
 .z9mon/

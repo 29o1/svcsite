@@ -7,8 +7,11 @@ import shlex
 from typing import Any
 
 from z9mon.adb import AdbClient
-from z9mon.constants import KPATCH_CANDIDATES, MODULE_NAME
+from z9mon.constants import DEPLOYED_MARKER_PATH, KPATCH_CANDIDATES, MODULE_NAME
 from z9mon.errors import EXIT_KPATCH, EXIT_KPM, EXIT_ROOT, Z9MonError
+
+
+_HEXDIGITS = frozenset("0123456789abcdef")
 
 
 def _redact(text: str, secret: str) -> str:
@@ -123,7 +126,13 @@ class KpmController:
                 "MODULE_NOT_LOADED",
                 f"{MODULE_NAME} is not loaded",
                 EXIT_KPM,
-                {"module": MODULE_NAME},
+                {
+                    "module": MODULE_NAME,
+                    "hint": (
+                        "deploy once with capture --kpm PATH (skip when current) "
+                        "or --load-module PATH (force replacement)"
+                    ),
+                },
             )
 
     def module_info(self) -> str:
@@ -138,7 +147,7 @@ class KpmController:
             )
         return stdout
 
-    def replace_module(self, local_path: str | Path) -> dict[str, str]:
+    def replace_module(self, local_path: str | Path) -> dict[str, Any]:
         """Replace the module with a generous timeout for hook installation."""
         original_timeout = self.adb.timeout
         self.adb.timeout = max(original_timeout, 60.0)
@@ -147,7 +156,51 @@ class KpmController:
         finally:
             self.adb.timeout = original_timeout
 
-    def _replace_module(self, local_path: str | Path) -> dict[str, str]:
+    def ensure_module(self, local_path: str | Path) -> dict[str, Any]:
+        """Converge the loaded module to the file at local_path.
+
+        A matching deployed fingerprint skips the reload entirely, so an
+        unchanged module costs one status round trip while a rebuilt one is
+        deployed on the next capture.
+        """
+        path = Path(local_path).expanduser().resolve()
+        if not path.is_file():
+            raise Z9MonError(
+                "KPM_FILE_NOT_FOUND",
+                "KPM file was not found",
+                EXIT_KPM,
+                {"path": str(path)},
+            )
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        loaded = self.is_loaded()
+        if loaded and self._read_deployed_marker() == digest:
+            return {
+                "action": "current",
+                "local_path": str(path),
+                "sha256": digest,
+            }
+        outcome = self.replace_module(path)
+        outcome["action"] = "loaded" if not loaded else "replaced"
+        return outcome
+
+    def _read_deployed_marker(self) -> str | None:
+        result = self.adb.root_shell(f"cat {shlex.quote(DEPLOYED_MARKER_PATH)}")
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip().lower()
+        if len(value) != 64 or not set(value) <= _HEXDIGITS:
+            return None
+        return value
+
+    def _write_deployed_marker(self, digest: str) -> bool:
+        command = (
+            f"printf %s {shlex.quote(digest)} "
+            f"> {shlex.quote(DEPLOYED_MARKER_PATH)}"
+        )
+        result = self.adb.root_shell(command)
+        return result.returncode == 0
+
+    def _replace_module(self, local_path: str | Path) -> dict[str, Any]:
         path = Path(local_path).expanduser().resolve()
         if not path.is_file():
             raise Z9MonError(
@@ -201,6 +254,7 @@ class KpmController:
             "remote_path": remote_path,
             "sha256": digest,
             "info": self.module_info(),
+            "marker_written": self._write_deployed_marker(digest),
         }
 
     def ctl0(self, command: str) -> dict[str, Any]:

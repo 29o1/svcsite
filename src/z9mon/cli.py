@@ -7,8 +7,10 @@ import sys
 from typing import Sequence
 
 from z9mon import __version__
+from z9mon.bench import BenchOptions, render_compare_table, run_bench, run_compare
 from z9mon.capture import CaptureOptions, run_capture
 from z9mon.commands import run_doctor, run_status, run_stop
+from z9mon.config import resolve_kpm_path
 from z9mon.errors import EXIT_INTERNAL, EXIT_USAGE, Z9MonError
 from z9mon.maps import run_address_resolve
 from z9mon.output import error_payload, success_payload, write_payload
@@ -136,6 +138,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--load-module",
         help="explicitly replace/load the KPM from this local absolute or relative path",
     )
+    capture_parser.add_argument(
+        "--kpm",
+        help=(
+            "converge the loaded KPM to this local module file; "
+            "replacement is skipped when the deployed sha256 already matches "
+            "(also read from config kpm_path)"
+        ),
+    )
 
     query_parser = subparsers.add_parser(
         "query",
@@ -218,6 +228,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit one compact JSON object",
     )
 
+    bench_parser = subparsers.add_parser(
+        "bench",
+        help="benchmark capture quality and query performance",
+    )
+    bench_subparsers = bench_parser.add_subparsers(
+        dest="bench_command",
+        required=True,
+    )
+    bench_run_parser = bench_subparsers.add_parser(
+        "run",
+        help="converge the module, run capture trials, and write a report",
+    )
+    _add_common_options(bench_run_parser)
+    bench_run_parser.add_argument(
+        "--package",
+        default="io.z9null.tracefixture",
+        help="controlled workload package (default: io.z9null.tracefixture)",
+    )
+    bench_run_parser.add_argument(
+        "--kpm",
+        help=(
+            "converge the loaded KPM to this local module file before the "
+            "trials; replacement is skipped when the deployed sha256 matches"
+        ),
+    )
+    bench_run_parser.add_argument(
+        "--duration",
+        type=_positive_timeout,
+        default=15.0,
+        help="active capture duration per trial in seconds (default: 15)",
+    )
+    bench_run_parser.add_argument(
+        "--trials",
+        type=_positive_integer,
+        default=5,
+        help="number of capture trials (default: 5)",
+    )
+    bench_run_parser.add_argument(
+        "--query-iterations",
+        type=_positive_integer,
+        default=5,
+        help="query subprocess iterations per mode (default: 5)",
+    )
+    bench_run_parser.add_argument(
+        "--target-mode",
+        choices=("attach", "launch", "restart"),
+        default="restart",
+        help="target lifecycle mode for every trial (default: restart)",
+    )
+    bench_run_parser.add_argument(
+        "--output",
+        default="./bench",
+        help="bench output directory (default: ./bench)",
+    )
+    bench_run_parser.add_argument(
+        "--keep-sessions",
+        action="store_true",
+        help="keep every trial session instead of only the median one",
+    )
+
+    bench_compare_parser = bench_subparsers.add_parser(
+        "compare",
+        help="compare two bench reports with noise-aware verdicts",
+    )
+    bench_compare_parser.add_argument("baseline", help="baseline report.json path")
+    bench_compare_parser.add_argument("candidate", help="candidate report.json path")
+    bench_compare_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one compact JSON object",
+    )
+
     return parser
 
 
@@ -228,7 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         argument_list[0]
         if argument_list
         and argument_list[0]
-        in {"doctor", "status", "stop", "capture", "query", "address"}
+        in {"doctor", "status", "stop", "capture", "query", "address", "bench"}
         else "cli"
     )
     if operation == "address" and "resolve" in argument_list:
@@ -271,6 +353,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     target_mode=args.target_mode,
                     output=args.output,
                     load_module=args.load_module,
+                    kpm=resolve_kpm_path(args.kpm),
                 )
             )
         elif operation == "query":
@@ -303,6 +386,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 detail=args.detail,
                 module_ids=tuple(args.module_id),
             )
+        elif operation == "bench":
+            operation = f"bench.{args.bench_command}"
+            if args.bench_command == "run":
+                data = run_bench(
+                    BenchOptions(
+                        device=args.device,
+                        timeout=args.timeout,
+                        key_file=args.key_file,
+                        package=args.package,
+                        kpm=resolve_kpm_path(args.kpm),
+                        duration=args.duration,
+                        trials=args.trials,
+                        output=args.output,
+                        keep_sessions=args.keep_sessions,
+                        query_iterations=args.query_iterations,
+                        target_mode=args.target_mode,
+                    )
+                )
+            else:
+                comparison = run_compare(args.baseline, args.candidate)
+                sys.stderr.write(render_compare_table(comparison) + "\n")
+                data = comparison
         else:
             operation = "address.resolve"
             data = run_address_resolve(

@@ -42,6 +42,7 @@ class CaptureOptions:
     target_mode: str
     output: str
     load_module: str | None
+    kpm: str | None = None
 
 
 def _module_version(status: dict[str, Any]) -> tuple[int, int]:
@@ -197,9 +198,14 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     controller = KpmController(adb, key.value)
     controller.locate_kpatch()
 
-    module_load: dict[str, str] | None = None
+    module_load: dict[str, Any] | None = None
+    module_deploy: dict[str, Any] | None = None
     if options.load_module:
         module_load = controller.replace_module(options.load_module)
+    elif options.kpm:
+        module_deploy = controller.ensure_module(options.kpm)
+        if module_deploy["action"] != "current":
+            module_load = module_deploy
     else:
         controller.require_loaded()
 
@@ -378,6 +384,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             "name": MODULE_NAME,
             "version": final_status.get("version"),
             "load": module_load,
+            "deploy": module_deploy,
             "final_status": final_status,
         },
         "artifacts": {

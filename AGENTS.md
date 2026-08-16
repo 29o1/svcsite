@@ -24,7 +24,9 @@ LLM.
 - Return absolute paths for generated artifacts.
 - Keep event queries bounded by a caller-provided limit.
 - `status` and `stop` should be safe to retry.
-- Module loading must remain an explicit operation.
+- Module loading must remain an explicit operation. `--load-module` replaces
+  unconditionally; `--kpm` converges (skips replacement when the deployed
+  sha256 already matches) and may also come from config `kpm_path`.
 - Treat `capture` as the task-level write operation and `query` as read-only.
 - A capture must finish with monitoring disabled and `events_buffered == 0`.
 - Capture maps for every process under the target UID after launch and before
@@ -47,6 +49,11 @@ LLM.
 - Custom syscall selection is restricted to KPM Tier1/Tier2 hooks with a
   statically declared arity; handle `SYSCALL_UNSUPPORTED` rather than retrying
   arbitrary syscall numbers.
+- `bench run` is operator tooling: it converges the module via `--kpm`, runs
+  repeated captures, changes device state for minutes, and writes reports under
+  `./bench`. Reports carry fingerprints (git, module, device) but never the
+  SuperKey. `bench compare` is offline and read-only; its human table goes to
+  stderr while stdout keeps the single-JSON contract.
 
 ## Development commands
 
@@ -74,11 +81,30 @@ PYTHONPATH=src python3 -m z9mon capture \
   --json
 ```
 
-If the module is absent, report `MODULE_NOT_LOADED`; only use
-`--load-module /absolute/path/to/z9null_monitor.kpm` when module replacement was
-requested. Explicit module loading has a minimum 60-second per-command wait
-because it installs kernel hooks; `stop`, `capture`, and module loading affect
-device state.
+If the module is absent, report `MODULE_NOT_LOADED`; use
+`--load-module /absolute/path/to/z9null_monitor.kpm` when unconditional module
+replacement was requested, or `--kpm /absolute/path/to/z9null_monitor.kpm` to
+converge (replace only when the deployed sha256 differs). Explicit module
+loading has a minimum 60-second per-command wait because it installs kernel
+hooks; `stop`, `capture`, and module loading affect device state.
+
+Benchmark the current build against a controlled workload:
+
+```bash
+PYTHONPATH=src python3 -m z9mon bench run \
+  --device SERIAL \
+  --kpm /absolute/path/to/z9null_monitor.kpm \
+  --json
+```
+
+Compare two bench reports (offline, read-only):
+
+```bash
+PYTHONPATH=src python3 -m z9mon bench compare \
+  /absolute/path/to/bench/OLD_RUN/report.json \
+  /absolute/path/to/bench/NEW_RUN/report.json \
+  --json
+```
 
 Read a bounded result:
 
