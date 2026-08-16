@@ -25,6 +25,22 @@ class ProcessInfo:
     name: str
 
 
+def parse_package_uid(output: str, package: str) -> int | None:
+    """Return the primary (user 0) UID from ``cmd package list packages -U``.
+
+    Cloned or work-profile installs append extra UIDs as a comma list; the
+    first entry is the user 0 UID this CLI monitors.
+    """
+    pattern = re.compile(
+        rf"^package:{re.escape(package)}(?:\s+.*)?\s+uid:(\d+(?:,\d+)*)"
+    )
+    for line in output.splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            return int(match.group(1).split(",")[0])
+    return None
+
+
 def parse_adb_devices(output: str) -> dict[str, str]:
     devices: dict[str, str] = {}
     for raw_line in output.splitlines():
@@ -254,13 +270,9 @@ class AdbClient:
                 {"package": package, "stderr": result.stderr.strip()},
             )
 
-        pattern = re.compile(
-            rf"^package:{re.escape(package)}(?:\s+.*)?\s+uid:(\d+)(?:\s|$)"
-        )
-        for line in result.stdout.splitlines():
-            match = pattern.match(line.strip())
-            if match:
-                return int(match.group(1))
+        pattern_match = parse_package_uid(result.stdout, package)
+        if pattern_match is not None:
+            return pattern_match
         raise Z9MonError(
             "PACKAGE_NOT_FOUND",
             "Android package was not found",
