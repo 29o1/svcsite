@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from test_protocol import make_event
 from z9mon.bench import (
-    _aggregate,
+    aggregate as _aggregate,
     compare_reports,
     compute_quality_metrics,
     format_metric_value,

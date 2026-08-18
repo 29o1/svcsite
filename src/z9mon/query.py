@@ -4,14 +4,11 @@ from collections import Counter
 from typing import Any, Sequence
 
 from z9mon.constants import KNOWN_SYSCALL_NAMES, KNOWN_SYSCALLS
+from z9mon.hexutil import hex_str
 from z9mon.errors import EXIT_DATA, EXIT_USAGE, Z9MonError
 from z9mon.maps import ModuleIndex
 from z9mon.protocol import Event, open_event_stream
 from z9mon.session import resolve_session
-
-
-def _hex(value: int) -> str:
-    return f"0x{value:x}"
 
 
 def _syscall_maps(manifest: dict[str, Any]) -> tuple[dict[str, int], dict[int, str]]:
@@ -96,10 +93,10 @@ def _event_payload(
     ]
     registers = payload["registers"]
     registers["caller_callsite"] = (
-        _hex(caller_callsite) if caller_callsite is not None else None
+        hex_str(caller_callsite) if caller_callsite is not None else None
     )
     payload["backtrace_callsites"] = [
-        _hex(address) if address is not None else None
+        hex_str(address) if address is not None else None
         for address in backtrace_callsites
     ]
     if module_index is None:
@@ -153,7 +150,7 @@ def _resolution_payload(
     return {key: resolved.get(key) for key in _COMPACT_RESOLUTION_FIELDS}
 
 
-def _event_callsites(
+def event_callsites(
     event: Event,
     module_index: ModuleIndex,
 ) -> list[dict[str, Any]]:
@@ -231,7 +228,7 @@ def _update_callsite_counts(
                     "seq": event.seq,
                     "pid": event.tgid,
                     "tid": event.pid,
-                    "address": _hex(callsite["address"]),
+                    "address": hex_str(callsite["address"]),
                 },
             }
         else:
@@ -343,7 +340,7 @@ def run_query(
             ):
                 continue
             callsites = (
-                _event_callsites(event, module_index)
+                event_callsites(event, module_index)
                 if module_index is not None
                 and (selected_module_ids or mode in {"stats", "callsites"})
                 else []

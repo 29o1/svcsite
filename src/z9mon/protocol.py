@@ -7,6 +7,8 @@ from pathlib import Path
 import struct
 from typing import Any, Iterator, Mapping
 
+from z9mon.hexutil import hex_str
+
 
 EVENT_MAGIC = 0x45435653
 EVENT_VERSION = 2
@@ -21,10 +23,6 @@ _RECORD_LAYOUTS = {
 }
 assert _RECORD_LAYOUTS[1][0].size == 212
 assert _RECORD_LAYOUTS[2][0].size == FIXED_RECORD_SIZE
-
-
-def _hex(value: int) -> str:
-    return f"0x{value:x}"
 
 
 def _signed_u64(value: int) -> int:
@@ -68,16 +66,16 @@ class Event:
                 "comm": self.comm,
             },
             "registers": {
-                "pc": _hex(self.pc),
-                "caller": _hex(self.caller),
-                "fp": _hex(self.fp),
-                "sp": _hex(self.sp),
-                "clone_fn": _hex(self.clone_fn),
-                "args": [_hex(value) for value in self.arguments],
+                "pc": hex_str(self.pc),
+                "caller": hex_str(self.caller),
+                "fp": hex_str(self.fp),
+                "sp": hex_str(self.sp),
+                "clone_fn": hex_str(self.clone_fn),
+                "args": [hex_str(value) for value in self.arguments],
                 "ret": self.ret,
-                "ret_hex": _hex(self.ret_raw),
+                "ret_hex": hex_str(self.ret_raw),
             },
-            "backtrace": [_hex(value) for value in self.backtrace],
+            "backtrace": [hex_str(value) for value in self.backtrace],
             "description": self.description,
         }
 
