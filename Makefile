@@ -12,6 +12,7 @@ endif
 
 check:
 	PYTHONPATH=src $(PYTHON) -m compileall -q src
+	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests
 
 kpm:
 	$(MAKE) -C kpm KP_DIR="$(KP_DIR)"
