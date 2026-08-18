@@ -8,9 +8,7 @@ Agent。
 
 ## 项目定位
 
-Z9Null Monitor 是独立的 syscall 观测工具，不负责包装或编排 IDA、
-GumTrace、Frida、Reqable，也不在 CLI 内嵌大模型。Agent 根据分析目标自行
-决定何时调用本工具。
+Z9Null Monitor 是独立的 syscall 观测工具，Agent 根据分析目标自行决定何时调用本工具。
 
 ```text
 Codex / Claude Code / Human
