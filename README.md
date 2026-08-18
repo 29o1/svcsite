@@ -151,14 +151,15 @@ captures/SESSION_ID/
 ├── manifest.json
 ├── events.bin
 ├── summary.json
-├── modules.json
 └── maps/
     ├── post-launch-PID.maps
-    └── pre-stop-PID.maps
+    ├── pre-stop-PID.maps
+    └── recovery-PID.maps
 ```
 
-`modules.json` 保留启动后和停止前的进程映射快照；若事件中出现尚未覆盖的
-PID，还会尝试生成 recovery 快照。maps 获取失败只记录 warning，不会让一次
+`maps/` 保留启动后和停止前的进程映射原始快照；若事件中出现尚未覆盖的
+PID，还会尝试生成 recovery 快照。地址解析直接读取这些快照；旧版本 session
+携带的 `modules.json` 仍然可用。maps 获取失败只记录 warning，不会让一次
 已完成的 syscall 采集失败。
 
 查询不会修改设备状态：
@@ -192,15 +193,15 @@ z9mon address resolve ./captures/SESSION_ID \
   --json
 ```
 
-普通查询默认最多返回 20 条 compact 事件；需要旧版完整映射字段时使用
-`--detail full`。当 session 含有 `modules.json` 时，`query` 会保留原始
+普通查询默认最多返回 20 条 compact 事件；需要完整映射字段时使用
+`--detail full`。当 session 含有映射数据时，`query` 会保留原始
 `pc`、`caller`、`clone_fn` 和 backtrace 地址，并增加调用点对应的 resolved
 字段。解析结果只做
 运行时地址归一化（`module`、`module_id`、`module_base`、`module_offset`）。
 `module` 是适合展示的 basename；`module_id` 组合完整规范化路径、设备号和
-inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。旧版 `modules.json`
-缺少该字段时会在查询阶段自动推导。v0.7.0 不拉取 ELF，也不提供符号名或源码
-行信息；旧 session 没有 `modules.json` 时仍可查询。
+inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。缺少该字段时会在查询
+阶段自动推导。v0.7.0 不拉取 ELF，也不提供符号名或源码行信息；没有映射数据
+的 session 仍可查询。
 
 `--module-id` 使用唯一模块标识筛选包含该模块调用点的事件。`--mode stats`
 返回 syscall、PID 和有界模块排名，便于 Agent 发现目标 `module_id`；

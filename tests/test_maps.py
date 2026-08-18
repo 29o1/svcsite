@@ -67,6 +67,46 @@ class ProcMapsTests(unittest.TestCase):
         self.assertEqual(resolved["module_base"], "0x6ffffff000")
         self.assertEqual(resolved["module_offset"], "0x1234")
 
+    def test_index_builds_from_raw_maps_dir_without_modules_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory)
+            maps_dir = session / "maps"
+            maps_dir.mkdir()
+            (maps_dir / "post-launch-123.maps").write_text(
+                MAPS_TEXT, encoding="utf-8"
+            )
+            (maps_dir / "pre-stop-123.maps").write_text(
+                MAPS_TEXT, encoding="utf-8"
+            )
+
+            index = ModuleIndex.from_session(session)
+            resolved = index.resolve(123, 0x7000000234) if index else None
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["module_id"], "file:103:02:42:/data/app/libtarget.so")
+        self.assertEqual(resolved["module_offset"], "0x1234")
+        self.assertEqual(index.source, maps_dir)
+
+    def test_later_snapshot_wins_when_pids_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory)
+            maps_dir = session / "maps"
+            maps_dir.mkdir()
+            (maps_dir / "post-launch-123.maps").write_text(
+                MAPS_TEXT, encoding="utf-8"
+            )
+            (maps_dir / "pre-stop-123.maps").write_text(
+                "8000000000-8000010000 r-xp 00001000 103:02 43 /data/app/other.so\n",
+                encoding="utf-8",
+            )
+
+            index = ModuleIndex.from_session(session)
+            resolved = index.resolve(123, 0x8000000234) if index else None
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["module"], "other.so")
+        self.assertEqual(resolved["snapshot_id"], "pre-stop")
+
     def test_address_command_uses_session_modules(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             session = Path(directory)

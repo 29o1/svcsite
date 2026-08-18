@@ -22,6 +22,6 @@ dist/
 !.env.example
 
 artifacts/
-captures/
-bench/
+/captures/
+/bench/
 .z9mon/

@@ -38,7 +38,7 @@ LLM.
 - Use `query --mode callsites --module-id MODULE_ID` to rank unique syscall
   callsites for one exact mapped binary.
 - Preserve raw runtime addresses. Resolved module/base/offset fields are
-  additive, and sessions without `modules.json` remain queryable.
+  additive, and sessions without mapping data remain queryable.
 - Preserve raw ARM64 return addresses. Derived callsites subtract four bytes
   and remain additive; do not treat the syscall PC itself as a return address.
 - Keep binary v1 sessions readable while new captures use binary v2 with up to
@@ -117,8 +117,9 @@ PYTHONPATH=src python3 -m z9mon query \
   --json
 ```
 
-Capture artifacts are `manifest.json`, `events.bin`, `summary.json`,
-`modules.json`, and raw snapshots under `maps/`.
+Capture artifacts are `manifest.json`, `events.bin`, `summary.json`, and
+raw snapshots under `maps/`. Address resolution parses the raw `maps/`
+snapshots; legacy sessions that carry `modules.json` are resolved from it.
 JSONL is produced only by `query --format jsonl`.
 
 Resolve one address without modifying device state:

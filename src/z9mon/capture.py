@@ -17,7 +17,7 @@ from z9mon.constants import (
 )
 from z9mon.errors import EXIT_KPM, EXIT_USAGE, Z9MonError
 from z9mon.kpm import KpmController, require_root
-from z9mon.maps import build_modules_document, capture_maps_snapshot
+from z9mon.maps import capture_maps_snapshot
 from z9mon.session import (
     base_manifest,
     create_session_directory,
@@ -54,14 +54,14 @@ def _module_version(status: dict[str, Any]) -> tuple[int, int]:
     return major, minor
 
 
-def _module_supports_drain(status: dict[str, Any]) -> None:
-    if _module_version(status) < (1, 1):
+def _require_module_version(status: dict[str, Any]) -> None:
+    if _module_version(status) < (1, 4):
         version = str(status.get("version", ""))
         raise Z9MonError(
             "MODULE_VERSION_UNSUPPORTED",
-            "loaded KPM does not support reliable stop-and-drain capture",
+            "loaded KPM is too old for this CLI; converge the module with --kpm",
             EXIT_KPM,
-            {"loaded_version": version or None, "required_version": "1.1.0"},
+            {"loaded_version": version or None, "required_version": "1.4.0"},
         )
 
 
@@ -210,9 +210,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         controller.require_loaded()
 
     initial_status = controller.status()
-    _module_supports_drain(initial_status)
-    if _module_version(initial_status) < (1, 4):
-        controller.configure_legacy_capture()
+    _require_module_version(initial_status)
     uid = adb.package_uid(options.package)
     syscall_numbers, syscall_names = _select_syscalls(
         controller,
@@ -222,7 +220,6 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     events_path = session_dir / "events.bin"
     manifest_path = session_dir / "manifest.json"
     summary_path = session_dir / "summary.json"
-    modules_path = session_dir / "modules.json"
     maps_dir = session_dir / "maps"
     warnings: list[dict[str, Any]] = []
     maps_snapshots: list[dict[str, Any]] = []
@@ -329,19 +326,6 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 only_pids=missing_pids,
             )
         )
-    modules_document = build_modules_document(session_dir.name, maps_snapshots)
-    modules_written = True
-    try:
-        write_json(modules_path, modules_document)
-    except OSError:
-        modules_written = False
-        warnings.append(
-            {
-                "code": "MODULES_WRITE_FAILED",
-                "phase": "modules",
-                "evidence_valid": True,
-            }
-        )
     mapped_pids = sorted(
         {
             process["pid"]
@@ -394,12 +378,11 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 "sha256": sha256_file(events_path),
             },
             "summary": {"path": str(summary_path)},
-            "modules": {
-                "path": str(modules_path) if modules_written else None,
+            "maps": {
+                "directory": maps_directory,
                 "snapshot_count": len(maps_snapshots),
                 "mapped_pids": mapped_pids,
             },
-            "maps": {"directory": maps_directory},
         },
         "warnings": warnings,
     }
@@ -416,7 +399,6 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             "manifest": str(manifest_path),
             "events": str(events_path),
             "summary": str(summary_path),
-            "modules": str(modules_path) if modules_written else None,
             "maps": maps_directory,
         },
         "warnings": _compact_warnings(warnings),

@@ -1,6 +1,11 @@
 import unittest
 
-from z9mon.capture import _compact_warnings, _module_supports_drain, _select_syscalls
+from z9mon.capture import (
+    _compact_warnings,
+    _module_version,
+    _require_module_version,
+    _select_syscalls,
+)
 from z9mon.errors import Z9MonError
 
 
@@ -54,11 +59,19 @@ class CaptureSelectionTests(unittest.TestCase):
         self.assertEqual(numbers, [56, 64])
         self.assertEqual(names[64], "write")
 
-    def test_rejects_module_without_stop_and_drain(self) -> None:
+    def test_rejects_module_older_than_1_4(self) -> None:
         with self.assertRaises(Z9MonError) as context:
-            _module_supports_drain({"version": "1.0.0"})
+            _require_module_version({"version": "1.3.0"})
 
         self.assertEqual(context.exception.code, "MODULE_VERSION_UNSUPPORTED")
+        self.assertIn("--kpm", context.exception.message)
+
+    def test_accepts_module_1_4_and_newer(self) -> None:
+        _require_module_version({"version": "1.4.0"})
+        _require_module_version({"version": "2.0.1"})
+
+    def test_unparseable_version_counts_as_too_old(self) -> None:
+        self.assertEqual(_module_version({"version": "dev"}), (0, 0))
 
     def test_rejects_untyped_dynamic_syscall_before_capture(self) -> None:
         with self.assertRaises(Z9MonError) as context:

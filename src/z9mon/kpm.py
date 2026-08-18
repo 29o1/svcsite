@@ -328,11 +328,6 @@ class KpmController:
     def clear(self) -> dict[str, Any]:
         return self.ctl0("clear")
 
-    def configure_legacy_capture(self) -> None:
-        """Normalize mutable writer controls that existed before KPM v1.4."""
-        self.ctl0("writer_mode bin")
-        self.ctl0("filp_open off")
-
     def start(self) -> dict[str, Any]:
         return self.ctl0("enable")
 

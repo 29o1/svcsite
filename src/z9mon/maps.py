@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 import json
 from pathlib import Path, PurePosixPath
@@ -9,12 +10,9 @@ from typing import Any, Iterable
 
 from z9mon.adb import AdbClient, ProcessInfo
 from z9mon.constants import MODULES_SCHEMA
+from z9mon.hexutil import hex_str
 from z9mon.errors import EXIT_DATA, Z9MonError
 from z9mon.session import utc_now
-
-
-def _hex(value: int) -> str:
-    return f"0x{value:x}"
 
 
 def _module_name(path: str) -> str | None:
@@ -90,11 +88,11 @@ def parse_proc_maps(raw: str) -> ParsedMaps:
             continue
         mappings.append(
             {
-                "start": _hex(start),
-                "end": _hex(end),
-                "size": _hex(end - start),
+                "start": hex_str(start),
+                "end": hex_str(end),
+                "size": hex_str(end - start),
                 "permissions": permissions,
-                "file_offset": _hex(offset),
+                "file_offset": hex_str(offset),
                 "device": device,
                 "inode": inode,
                 "path": path or None,
@@ -191,7 +189,6 @@ def capture_maps_snapshot(
                 "maps_path": str(raw_path),
                 "mapping_count": len(parsed.mappings),
                 "invalid_lines": parsed.invalid_lines,
-                "mappings": list(parsed.mappings),
             }
         )
 
@@ -220,17 +217,6 @@ def capture_maps_snapshot(
         "snapshot_id": snapshot_id,
         "captured_at": captured_at,
         "processes": captured_processes,
-    }
-
-
-def build_modules_document(
-    session_id: str,
-    snapshots: Iterable[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "schema_version": MODULES_SCHEMA,
-        "session_id": session_id,
-        "snapshots": list(snapshots),
     }
 
 
@@ -302,7 +288,7 @@ class ModuleIndex:
     def from_session(cls, session_dir: Path) -> ModuleIndex | None:
         source = session_dir / "modules.json"
         if not source.is_file():
-            return None
+            return cls.from_maps_dir(session_dir)
         try:
             document = json.loads(source.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -321,6 +307,66 @@ class ModuleIndex:
             )
         return cls(source, document)
 
+    @classmethod
+    def from_maps_dir(cls, session_dir: Path) -> ModuleIndex | None:
+        """Build an index from raw maps/ snapshots ({snapshot}-{pid}.maps).
+
+        Filenames sort alphabetically into capture order (post-launch,
+        pre-stop, recovery), matching the legacy modules.json layout.
+        """
+
+        maps_dir = session_dir / "maps"
+        if not maps_dir.is_dir():
+            return None
+        snapshots: list[dict[str, Any]] = []
+        snapshots_by_id: dict[str, dict[str, Any]] = {}
+        for raw_path in sorted(maps_dir.glob("*.maps")):
+            stem = raw_path.name.removesuffix(".maps")
+            snapshot_id, _, pid_text = stem.rpartition("-")
+            if not snapshot_id or not pid_text.isdigit():
+                continue
+            try:
+                raw = raw_path.read_text(encoding="utf-8")
+                captured_at = (
+                    datetime.fromtimestamp(
+                        raw_path.stat().st_mtime, timezone.utc
+                    )
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                )
+            except OSError as exc:
+                raise Z9MonError(
+                    "MODULES_INVALID",
+                    "maps snapshot could not be read",
+                    EXIT_DATA,
+                    {"path": str(raw_path), "reason": str(exc)},
+                ) from exc
+            snapshot = snapshots_by_id.get(snapshot_id)
+            if snapshot is None:
+                snapshot = {
+                    "snapshot_id": snapshot_id,
+                    "captured_at": captured_at,
+                    "processes": [],
+                }
+                snapshots_by_id[snapshot_id] = snapshot
+                snapshots.append(snapshot)
+            snapshot["processes"].append(
+                {
+                    "pid": int(pid_text),
+                    "mappings": list(parse_proc_maps(raw).mappings),
+                }
+            )
+        if not snapshots:
+            return None
+        return cls(
+            maps_dir,
+            {
+                "schema_version": MODULES_SCHEMA,
+                "session_id": session_dir.name,
+                "snapshots": snapshots,
+            },
+        )
+
     @lru_cache(maxsize=32768)
     def resolve(self, pid: int, address: int) -> dict[str, Any] | None:
         if address <= 0:
@@ -334,7 +380,7 @@ class ModuleIndex:
                 continue
             resolved = self._resolved_payload(mapping, address)
             return {
-                "runtime": _hex(address),
+                "runtime": hex_str(address),
                 "pid": pid,
                 "snapshot_id": snapshot.snapshot_id,
                 "captured_at": snapshot.captured_at,
@@ -370,11 +416,11 @@ class ModuleIndex:
             "module": mapping.get("module"),
             "module_id": module_id,
             "path": path,
-            "module_base": _hex(module_base),
-            "module_offset": _hex(address - module_base),
-            "mapping_start": _hex(start),
-            "mapping_end": _hex(end),
-            "file_offset": _hex(file_offset),
+            "module_base": hex_str(module_base),
+            "module_offset": hex_str(address - module_base),
+            "mapping_start": hex_str(start),
+            "mapping_end": hex_str(end),
+            "file_offset": hex_str(file_offset),
             "permissions": mapping.get("permissions"),
         }
 
@@ -384,7 +430,7 @@ def require_module_index(session_dir: Path) -> ModuleIndex:
     if index is None:
         raise Z9MonError(
             "MODULES_NOT_FOUND",
-            "session does not contain modules.json",
+            "session has no modules.json and no maps directory",
             EXIT_DATA,
             {"session": str(session_dir)},
         )
@@ -406,7 +452,7 @@ def run_address_resolve(
         "session": str(session_dir),
         "source": str(index.source),
         "pid": pid,
-        "address": _hex(address),
+        "address": hex_str(address),
         "resolved": resolved is not None,
         "mapping": resolved,
     }
