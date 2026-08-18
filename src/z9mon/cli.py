@@ -2,88 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from typing import Sequence
 
 from z9mon import __version__
-from z9mon.bench import BenchOptions, render_compare_table, run_bench, run_compare
-from z9mon.capture import CaptureOptions, run_capture
-from z9mon.commands import run_doctor, run_status, run_stop
-from z9mon.config import resolve_kpm_path
+from z9mon.commands import COMMAND_MODULES
 from z9mon.errors import EXIT_INTERNAL, EXIT_USAGE, Z9MonError
-from z9mon.maps import run_address_resolve
 from z9mon.output import error_payload, success_payload, write_payload
-from z9mon.query import run_query
 
 
 class Z9MonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise Z9MonError("USAGE_ERROR", message, EXIT_USAGE)
-
-
-def _positive_timeout(value: str) -> float:
-    try:
-        timeout = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("timeout must be a number") from exc
-    if timeout <= 0:
-        raise argparse.ArgumentTypeError("timeout must be greater than zero")
-    return timeout
-
-
-def _positive_integer(value: str) -> int:
-    try:
-        number = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("value must be an integer") from exc
-    if number <= 0:
-        raise argparse.ArgumentTypeError("value must be greater than zero")
-    return number
-
-
-def _address_value(value: str) -> int:
-    try:
-        address = int(value, 0)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "address must be a decimal or 0x-prefixed hexadecimal integer"
-        ) from exc
-    if address <= 0:
-        raise argparse.ArgumentTypeError("address must be greater than zero")
-    return address
-
-
-def _flatten_values(values: Sequence[str]) -> tuple[str, ...]:
-    return tuple(
-        item.strip()
-        for value in values
-        for item in value.split(",")
-        if item.strip()
-    )
-
-
-def _add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--device",
-        default=os.environ.get("ANDROID_SERIAL"),
-        help="ADB device serial; defaults to ANDROID_SERIAL or the only ready device",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=_positive_timeout,
-        default=15.0,
-        help="per-command timeout in seconds (default: 15)",
-    )
-    parser.add_argument(
-        "--key-file",
-        help="SuperKey file; defaults to Z9MON_SUPERKEY_FILE or ~/.config/z9mon/superkey",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="emit one compact JSON object",
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,225 +22,21 @@ def build_parser() -> argparse.ArgumentParser:
         description="Agent-friendly Android syscall dynamic analysis CLI",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name, help_text in (
-        ("doctor", "check host, device, root, kpatch, and SuperKey configuration"),
-        ("status", "read z9null_monitor KPM status"),
-        ("stop", "pause z9null_monitor KPM monitoring"),
-    ):
-        command_parser = subparsers.add_parser(name, help=help_text)
-        _add_common_options(command_parser)
-
-    capture_parser = subparsers.add_parser(
-        "capture",
-        help="run one bounded syscall capture and save a session",
-    )
-    _add_common_options(capture_parser)
-    capture_parser.add_argument("--package", required=True, help="Android package name")
-    capture_parser.add_argument(
-        "--duration",
-        type=_positive_timeout,
-        default=15.0,
-        help="active capture duration in seconds (default: 15)",
-    )
-    capture_parser.add_argument(
-        "--syscall",
-        action="append",
-        default=[],
-        help=(
-            "custom syscall name/number; repeat or comma-separate; "
-            "defaults to reverse-basic"
-        ),
-    )
-    capture_parser.add_argument(
-        "--target-mode",
-        choices=("attach", "launch", "restart"),
-        default="attach",
-        help="target lifecycle mode (default: attach)",
-    )
-    capture_parser.add_argument(
-        "--output",
-        default="./captures",
-        help="session output directory (default: ./captures)",
-    )
-    capture_parser.add_argument(
-        "--load-module",
-        help="explicitly replace/load the KPM from this local absolute or relative path",
-    )
-    capture_parser.add_argument(
-        "--kpm",
-        help=(
-            "converge the loaded KPM to this local module file; "
-            "replacement is skipped when the deployed sha256 already matches "
-            "(also read from config kpm_path)"
-        ),
-    )
-
-    query_parser = subparsers.add_parser(
-        "query",
-        help="filter a capture session without loading all events into Agent context",
-    )
-    query_parser.add_argument("session", help="capture session directory or events.bin")
-    query_parser.add_argument(
-        "--syscall",
-        action="append",
-        default=[],
-        help="syscall name/number filter; repeat or comma-separate",
-    )
-    query_parser.add_argument("--pid", type=_positive_integer, help="process ID filter")
-    query_parser.add_argument("--tid", type=_positive_integer, help="thread ID filter")
-    query_parser.add_argument("--contains", help="case-insensitive text filter")
-    query_parser.add_argument(
-        "--limit",
-        type=_positive_integer,
-        default=20,
-        help="maximum returned events or callsites (default: 20)",
-    )
-    query_parser.add_argument(
-        "--mode",
-        choices=("events", "stats", "callsites"),
-        default="events",
-        help="query result mode (default: events)",
-    )
-    query_parser.add_argument(
-        "--module-id",
-        action="append",
-        default=[],
-        help="require a callsite with this exact module_id; may be repeated",
-    )
-    query_parser.add_argument(
-        "--detail",
-        choices=("compact", "full"),
-        default="compact",
-        help="event address detail (default: compact)",
-    )
-    query_parser.add_argument(
-        "--format",
-        choices=("json", "jsonl"),
-        default="json",
-        help="output encoding (default: json)",
-    )
-    query_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="emit one compact JSON object",
-    )
-
-    address_parser = subparsers.add_parser(
-        "address",
-        help="resolve runtime addresses using a capture session's maps",
-    )
-    address_subparsers = address_parser.add_subparsers(
-        dest="address_command",
-        required=True,
-    )
-    resolve_parser = address_subparsers.add_parser(
-        "resolve",
-        help="resolve one runtime address to a module and relative offset",
-    )
-    resolve_parser.add_argument("session", help="capture session directory")
-    resolve_parser.add_argument(
-        "--pid",
-        required=True,
-        type=_positive_integer,
-        help="process ID whose maps should be used",
-    )
-    resolve_parser.add_argument(
-        "--address",
-        required=True,
-        type=_address_value,
-        help="runtime address in decimal or 0x-prefixed hexadecimal",
-    )
-    resolve_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="emit one compact JSON object",
-    )
-
-    bench_parser = subparsers.add_parser(
-        "bench",
-        help="benchmark capture quality and query performance",
-    )
-    bench_subparsers = bench_parser.add_subparsers(
-        dest="bench_command",
-        required=True,
-    )
-    bench_run_parser = bench_subparsers.add_parser(
-        "run",
-        help="converge the module, run capture trials, and write a report",
-    )
-    _add_common_options(bench_run_parser)
-    bench_run_parser.add_argument(
-        "--package",
-        default="io.z9null.tracefixture",
-        help="controlled workload package (default: io.z9null.tracefixture)",
-    )
-    bench_run_parser.add_argument(
-        "--kpm",
-        help=(
-            "converge the loaded KPM to this local module file before the "
-            "trials; replacement is skipped when the deployed sha256 matches"
-        ),
-    )
-    bench_run_parser.add_argument(
-        "--duration",
-        type=_positive_timeout,
-        default=15.0,
-        help="active capture duration per trial in seconds (default: 15)",
-    )
-    bench_run_parser.add_argument(
-        "--trials",
-        type=_positive_integer,
-        default=5,
-        help="number of capture trials (default: 5)",
-    )
-    bench_run_parser.add_argument(
-        "--query-iterations",
-        type=_positive_integer,
-        default=5,
-        help="query subprocess iterations per mode (default: 5)",
-    )
-    bench_run_parser.add_argument(
-        "--target-mode",
-        choices=("attach", "launch", "restart"),
-        default="restart",
-        help="target lifecycle mode for every trial (default: restart)",
-    )
-    bench_run_parser.add_argument(
-        "--output",
-        default="./bench",
-        help="bench output directory (default: ./bench)",
-    )
-    bench_run_parser.add_argument(
-        "--keep-sessions",
-        action="store_true",
-        help="keep every trial session instead of only the median one",
-    )
-
-    bench_compare_parser = bench_subparsers.add_parser(
-        "compare",
-        help="compare two bench reports with noise-aware verdicts",
-    )
-    bench_compare_parser.add_argument("baseline", help="baseline report.json path")
-    bench_compare_parser.add_argument("candidate", help="candidate report.json path")
-    bench_compare_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="emit one compact JSON object",
-    )
-
+    for module in COMMAND_MODULES:
+        module.add_parser(subparsers)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     argument_list = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
+    modules = {module.NAME: module for module in COMMAND_MODULES}
+    # Pre-parse operation/output state so usage errors still emit JSON with
+    # the right operation name.
     operation = (
         argument_list[0]
-        if argument_list
-        and argument_list[0]
-        in {"doctor", "status", "stop", "capture", "query", "address", "bench"}
+        if argument_list and argument_list[0] in modules
         else "cli"
     )
     if operation == "address" and "resolve" in argument_list:
@@ -320,101 +46,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         args = parser.parse_args(argument_list)
-        operation = args.command
-        jsonl = operation == "query" and args.format == "jsonl"
+        module = modules[args.command]
+        operation = module.operation(args)
+        jsonl = args.command == "query" and args.format == "jsonl"
         compact = args.json or jsonl
-        if operation == "doctor":
-            data = run_doctor(
-                device=args.device,
-                timeout=args.timeout,
-                key_file=args.key_file,
-            )
-        elif operation == "status":
-            data = run_status(
-                device=args.device,
-                timeout=args.timeout,
-                key_file=args.key_file,
-            )
-        elif operation == "stop":
-            data = run_stop(
-                device=args.device,
-                timeout=args.timeout,
-                key_file=args.key_file,
-            )
-        elif operation == "capture":
-            data = run_capture(
-                CaptureOptions(
-                    device=args.device,
-                    timeout=args.timeout,
-                    key_file=args.key_file,
-                    package=args.package,
-                    duration=args.duration,
-                    syscalls=_flatten_values(args.syscall),
-                    target_mode=args.target_mode,
-                    output=args.output,
-                    load_module=args.load_module,
-                    kpm=resolve_kpm_path(args.kpm),
-                )
-            )
-        elif operation == "query":
-            if args.json and args.format == "jsonl":
-                raise Z9MonError(
-                    "USAGE_ERROR",
-                    "--json and --format jsonl are mutually exclusive",
-                    EXIT_USAGE,
-                )
-            if args.format == "jsonl" and args.mode != "events":
-                raise Z9MonError(
-                    "USAGE_ERROR",
-                    "JSONL output requires query mode events",
-                    EXIT_USAGE,
-                )
-            if args.mode != "events" and args.detail != "compact":
-                raise Z9MonError(
-                    "USAGE_ERROR",
-                    "--detail applies only to query mode events",
-                    EXIT_USAGE,
-                )
-            data = run_query(
-                session=args.session,
-                mode=args.mode,
-                syscalls=_flatten_values(args.syscall),
-                pid=args.pid,
-                tid=args.tid,
-                contains=args.contains,
-                limit=args.limit,
-                detail=args.detail,
-                module_ids=tuple(args.module_id),
-            )
-        elif operation == "bench":
-            operation = f"bench.{args.bench_command}"
-            if args.bench_command == "run":
-                data = run_bench(
-                    BenchOptions(
-                        device=args.device,
-                        timeout=args.timeout,
-                        key_file=args.key_file,
-                        package=args.package,
-                        kpm=resolve_kpm_path(args.kpm),
-                        duration=args.duration,
-                        trials=args.trials,
-                        output=args.output,
-                        keep_sessions=args.keep_sessions,
-                        query_iterations=args.query_iterations,
-                        target_mode=args.target_mode,
-                    )
-                )
-            else:
-                comparison = run_compare(args.baseline, args.candidate)
-                sys.stderr.write(render_compare_table(comparison) + "\n")
-                data = comparison
-        else:
-            operation = "address.resolve"
-            data = run_address_resolve(
-                session=args.session,
-                pid=args.pid,
-                address=args.address,
-            )
+        data = module.run(args)
         payload = success_payload(operation, data)
         exit_code = 0
     except Z9MonError as exc:
