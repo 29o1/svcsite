@@ -6,17 +6,8 @@ from typing import Any, Sequence
 
 # (aggregate key, display label, unit, higher_is_better; None marks context)
 METRIC_SPECS: tuple[tuple[str, str, str, bool | None], ...] = (
-    ("performance.query_events_p50_ms", "query events p50", "ms", False),
-    ("performance.query_events_per_10k_ms", "query events /10k events", "ms", False),
-    ("performance.query_stats_p50_ms", "query stats p50", "ms", False),
-    ("performance.query_stats_per_10k_ms", "query stats /10k events", "ms", False),
-    ("performance.query_callsites_p50_ms", "query callsites p50", "ms", False),
-    (
-        "performance.query_callsites_per_10k_ms",
-        "query callsites /10k events",
-        "ms",
-        False,
-    ),
+    ("performance.query_p50_ms", "query p50", "ms", False),
+    ("performance.query_per_10k_ms", "query /10k events", "ms", False),
     ("performance.capture_wall_p50_s", "capture wall p50", "s", False),
     ("evidence.callsite_resolve_rate", "callsite resolve rate", "rate", True),
     ("evidence.frame_resolve_rate", "frame resolve rate", "rate", True),

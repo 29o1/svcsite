@@ -15,7 +15,7 @@ def median_session(trials: list[dict[str, Any]]) -> dict[str, Any]:
 
 def aggregate(
     trials: list[dict[str, Any]],
-    query_timings: dict[str, dict[str, Any]],
+    query_timing: dict[str, Any],
     events_total: int,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     evidence: dict[str, Any] = {}
@@ -43,15 +43,14 @@ def aggregate(
 
     performance: dict[str, Any] = {
         "capture_wall_p50_s": round(statistics.median(walls), 2),
-    }
-    for mode, timing in query_timings.items():
-        performance[f"query_{mode}_p50_ms"] = timing["p50_ms"]
-        performance[f"query_{mode}_p95_ms"] = timing["p95_ms"]
-        performance[f"query_{mode}_per_10k_ms"] = (
-            round(timing["p50_ms"] * 10000.0 / events_total, 1)
+        "query_p50_ms": query_timing["p50_ms"],
+        "query_p95_ms": query_timing["p95_ms"],
+        "query_per_10k_ms": (
+            round(query_timing["p50_ms"] * 10000.0 / events_total, 1)
             if events_total
             else None
-        )
+        ),
+    }
 
     noise: dict[str, float] = {}
     for key in trials[0]["evidence"]:
@@ -69,16 +68,18 @@ def aggregate(
         iqr([float(trial["events"]) for trial in trials]), 1
     )
     noise["performance.capture_wall_p50_s"] = round(iqr(walls), 2)
-    for mode, timing in query_timings.items():
-        # The band keeps run-to-run scheduler jitter out of the verdicts:
-        # within-run IQR alone underestimates it, so include the upper tail.
-        timings = timing["timings_ms"]
-        band = max(iqr(timings), percentile(timings, 0.95) - statistics.median(timings))
-        noise[f"performance.query_{mode}_p50_ms"] = round(band, 1)
-        if events_total:
-            noise[f"performance.query_{mode}_per_10k_ms"] = round(
-                band * 10000.0 / events_total, 1
-            )
+    # The band keeps run-to-run scheduler jitter out of the verdicts:
+    # within-run IQR alone underestimates it, so include the upper tail.
+    timings = query_timing["timings_ms"]
+    band = max(
+        iqr(timings),
+        percentile(timings, 0.95) - statistics.median(timings),
+    )
+    noise["performance.query_p50_ms"] = round(band, 1)
+    if events_total:
+        noise["performance.query_per_10k_ms"] = round(
+            band * 10000.0 / events_total, 1
+        )
 
     return (
         {

@@ -1,9 +1,8 @@
 """Golden schema checks over a frozen synthetic session.
 
-These assertions keep the agent-facing query contract stable: every mode
-must keep its mandatory fields, aggregate modes must never embed event
-objects, and the same frozen input must always produce the same output.
-Additive fields stay allowed; removals and mode leakage fail here.
+These assertions keep the agent-facing query contract stable: every query
+returns bounded events and ranked callsites, and the same frozen input must
+always produce the same output. Additive fields stay allowed.
 """
 
 import json
@@ -19,7 +18,6 @@ from z9mon.query import run_query
 COMMON_KEYS = (
     "session",
     "source",
-    "mode",
     "filters",
     "limit",
     "counts",
@@ -44,7 +42,8 @@ def frozen_session(directory: Path, *, version: int = 2) -> Path:
                         {"nr": 56, "name": "openat"},
                         {"nr": 63, "name": "read"},
                     ]
-                }
+                },
+                "summary": {"kernel_dropped": 0},
             }
         ),
         encoding="utf-8",
@@ -86,7 +85,6 @@ def frozen_session(directory: Path, *, version: int = 2) -> Path:
 def query(session: Path, **overrides):
     arguments = {
         "session": str(session),
-        "mode": "events",
         "syscalls": (),
         "pid": None,
         "tid": None,
@@ -98,14 +96,23 @@ def query(session: Path, **overrides):
 
 
 class GoldenSchemaTests(unittest.TestCase):
-    def test_events_mode_keeps_mandatory_fields(self) -> None:
+    def test_query_keeps_mandatory_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = query(frozen_session(Path(directory)))
 
-            for key in (*COMMON_KEYS, "detail", "events"):
+            for key in (*COMMON_KEYS, "events", "callsites"):
                 self.assertIn(key, result)
-            for key in ("total", "matched", "returned", "truncated"):
+            for key in (
+                "total",
+                "matched",
+                "events_returned",
+                "events_truncated",
+                "callsites_unique",
+                "callsites_returned",
+                "callsites_truncated",
+            ):
                 self.assertIsInstance(result["counts"][key], int)
+            self.assertEqual(result["quality"]["kernel_dropped"], 0)
             self.assertEqual(
                 sorted(result["events"][0]),
                 sorted(
@@ -121,48 +128,26 @@ class GoldenSchemaTests(unittest.TestCase):
                     )
                 ),
             )
-
-    def test_stats_mode_keeps_mandatory_fields_and_hides_events(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            result = query(frozen_session(Path(directory)), mode="stats", limit=10)
-
-            for key in (*COMMON_KEYS, "stats", "module_counts"):
-                self.assertIn(key, result)
-            self.assertNotIn("events", result)
-            for key in ("by_syscall", "by_pid", "by_module"):
-                self.assertIn(key, result["stats"])
-            for key in ("unique", "returned", "truncated"):
-                self.assertIsInstance(result["module_counts"][key], int)
-
-    def test_callsites_mode_keeps_mandatory_fields_and_hides_events(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            result = query(
-                frozen_session(Path(directory)),
-                mode="callsites",
-                module_ids=("file:golden:libfixture.so",),
-            )
-
-            for key in (*COMMON_KEYS, "callsites", "callsite_counts"):
-                self.assertIn(key, result)
-            self.assertNotIn("events", result)
-            self.assertGreater(result["callsite_counts"]["unique"], 0)
-            for key in ("count", "syscall", "module_id", "module_offset", "sample"):
+            self.assertGreater(result["counts"]["callsites_unique"], 0)
+            for key in (
+                "count",
+                "syscall",
+                "module_id",
+                "module_offset",
+                "sample",
+            ):
                 self.assertIn(key, result["callsites"][0])
 
     def test_frozen_session_output_is_deterministic(self) -> None:
         def snapshot() -> dict:
             with tempfile.TemporaryDirectory() as directory:
                 session = frozen_session(Path(directory))
-                return {
-                    mode: query(session, mode=mode, limit=50)
-                    for mode in ("events", "stats", "callsites")
-                }
+                return query(session, limit=50)
 
         def normalize(result: dict) -> str:
-            for entry in result.values():
-                entry.pop("session", None)
-                entry.pop("source", None)
-                entry.get("address_resolution", {}).pop("source", None)
+            result.pop("session", None)
+            result.pop("source", None)
+            result.get("address_resolution", {}).pop("source", None)
             return json.dumps(result, sort_keys=True)
 
         self.assertEqual(normalize(snapshot()), normalize(snapshot()))

@@ -65,21 +65,15 @@ def _query_environment() -> dict[str, str]:
     return environment
 
 
-_QUERY_MODES: dict[str, tuple[str, ...]] = {
-    "events": ("--mode", "events", "--syscall", "openat", "--limit", "50"),
-    "stats": ("--mode", "stats", "--limit", "50"),
-    "callsites": ("--mode", "callsites", "--limit", "50"),
-}
+_QUERY_ARGUMENTS = ("--syscall", "openat", "--limit", "50")
 
 
-def time_query_mode(
+def time_query(
     session: Path,
-    mode: str,
     iterations: int,
 ) -> dict[str, Any]:
     """Time CLI query subprocesses; enforces the single-JSON stdout contract."""
 
-    arguments = _QUERY_MODES[mode]
     timings: list[float] = []
     for _ in range(iterations):
         command = [
@@ -88,7 +82,7 @@ def time_query_mode(
             "z9mon",
             "query",
             str(session),
-            *arguments,
+            *_QUERY_ARGUMENTS,
             "--json",
         ]
         started = time.perf_counter()
@@ -105,7 +99,7 @@ def time_query_mode(
                 "BENCH_QUERY_FAILED",
                 "bench query subprocess failed",
                 EXIT_DATA,
-                {"mode": mode, "stderr": result.stderr[-500:]},
+                {"stderr": result.stderr[-500:]},
             )
         try:
             json.loads(result.stdout)
@@ -114,7 +108,7 @@ def time_query_mode(
                 "BENCH_QUERY_CONTRACT",
                 "bench query output was not one JSON object",
                 EXIT_DATA,
-                {"mode": mode, "reason": str(exc)},
+                {"reason": str(exc)},
             ) from exc
         timings.append(elapsed)
     return {
@@ -170,7 +164,6 @@ def run_bench(options: BenchOptions) -> dict[str, Any]:
                 syscalls=(),
                 target_mode=options.target_mode,
                 output=str(sessions_root),
-                load_module=None,
                 kpm=None,
             )
         )
@@ -222,13 +215,10 @@ def run_bench(options: BenchOptions) -> dict[str, Any]:
             if trial["session_id"] != kept["session_id"]:
                 shutil.rmtree(trial["session"], ignore_errors=True)
 
-    _progress("benchmarking query modes")
-    query_timings = {
-        mode: time_query_mode(kept_path, mode, options.query_iterations)
-        for mode in _QUERY_MODES
-    }
+    _progress("benchmarking query")
+    query_timing = time_query(kept_path, options.query_iterations)
 
-    aggregate_data, noise = aggregate(trials, query_timings, kept["events"])
+    aggregate_data, noise = aggregate(trials, query_timing, kept["events"])
 
     fingerprint = {
         "generated_at": generated_at,
@@ -277,7 +267,7 @@ def run_bench(options: BenchOptions) -> dict[str, Any]:
         ],
         "aggregate": aggregate_data,
         "noise": noise,
-        "query_timings": query_timings,
+        "query_timing": query_timing,
         "session": str(kept_path),
     }
 

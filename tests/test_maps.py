@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from z9mon.constants import MODULES_SCHEMA
-from z9mon.maps import ModuleIndex, parse_proc_maps, run_address_resolve
+from z9mon.maps import ModuleIndex, parse_proc_maps
 
 
 MAPS_TEXT = """7000000000-7000010000 r-xp 00001000 103:02 42 /data/app/libtarget.so
@@ -106,24 +106,6 @@ class ProcMapsTests(unittest.TestCase):
         self.assertIsNotNone(resolved)
         self.assertEqual(resolved["module"], "other.so")
         self.assertEqual(resolved["snapshot_id"], "pre-stop")
-
-    def test_address_command_uses_session_modules(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            session = Path(directory)
-            (session / "events.bin").write_bytes(b"")
-            (session / "modules.json").write_text(
-                json.dumps(modules_document()),
-                encoding="utf-8",
-            )
-
-            result = run_address_resolve(
-                session=str(session),
-                pid=123,
-                address=0x7000000234,
-            )
-
-        self.assertTrue(result["resolved"])
-        self.assertEqual(result["mapping"]["module_offset"], "0x1234")
 
     def test_same_basename_has_distinct_module_ids(self) -> None:
         parsed = parse_proc_maps(

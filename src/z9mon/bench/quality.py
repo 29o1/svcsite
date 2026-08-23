@@ -54,10 +54,13 @@ def compute_quality_metrics(session_dir: str | Path) -> dict[str, Any]:
         parser_quality = stream.quality()
 
     summary: dict[str, Any] = {}
-    summary_path = session / "summary.json"
-    if summary_path.is_file():
+    manifest_path = session / "manifest.json"
+    if manifest_path.is_file():
         try:
-            loaded = json.loads(summary_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            loaded = (
+                manifest.get("summary") if isinstance(manifest, dict) else None
+            )
             if isinstance(loaded, dict):
                 summary = loaded
         except (OSError, json.JSONDecodeError):

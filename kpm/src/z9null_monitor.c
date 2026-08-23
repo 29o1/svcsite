@@ -93,7 +93,7 @@ static unsigned long lookup_symbol_log(const char *name)
     return addr;
 }
 
-#define Z9MON_KPM_VERSION "1.4.0"
+#define Z9MON_KPM_VERSION "1.5.0"
 
 KPM_NAME("z9null_monitor");
 KPM_VERSION(Z9MON_KPM_VERSION);
@@ -246,9 +246,18 @@ static const char *get_syscall_name(int nr)
  * ================================================================ */
 static volatile int g_enabled = 0;           // 监控开关，0=暂停，1=启用
 static volatile int g_target_uid = -1;       // UID 过滤，-1=全部，>=0=只监控指定 UID
+static volatile int g_target_tgid = -1;      // TGID 过滤，-1=UID 内全部，>0=精确进程
 static volatile unsigned long g_nr_bitmap[BITMAP_LONGS]; // 位图：哪些 syscall NR 要记录
 static volatile unsigned int g_seq = 0;      // 事件序列号（全局自增）
 static volatile unsigned int g_total = 0;    // 总事件计数
+
+static int target_matches(int uid)
+{
+    if (g_target_uid >= 0 && uid != g_target_uid) return 0;
+    if (g_target_tgid > 0 &&
+        (int)raw_syscall0(__NR_getpid) != g_target_tgid) return 0;
+    return 1;
+}
 
 /* read(2) needs after-hook to dump user buffer, so we cache entry args by TID */
 #define READ_CTX_SLOTS 2048
@@ -1789,7 +1798,7 @@ static void before_generic(hook_fargs4_t *args, void *udata)
     if (!bitmap_test(g_nr_bitmap, nr)) return;
 
     uid = (int)current_uid();
-    if (g_target_uid >= 0 && uid != g_target_uid) return;
+    if (!target_matches(uid)) return;
 
     /* Read syscall arguments using official API */
     a0 = syscall_argn(args, 0);
@@ -1992,7 +2001,7 @@ static void after_clone_ret(hook_fargs0_t *args, void *udata)
     if (!g_enabled) return;
     if (ret <= 0) return;
     uid = (int)current_uid();
-    if (g_target_uid >= 0 && uid != g_target_uid) return;
+    if (!target_matches(uid)) return;
     if (nr != __NR_clone && nr != 435) return;
     if (!bitmap_test(g_nr_bitmap, nr)) return;
 
@@ -2055,7 +2064,7 @@ static void after_read_ret(hook_fargs0_t *args, void *udata)
 
     if (!g_enabled) return;
     uid = (int)current_uid();
-    if (g_target_uid >= 0 && uid != g_target_uid) return;
+    if (!target_matches(uid)) return;
     if (nr != __NR_read) return;
     if (!bitmap_test(g_nr_bitmap, nr)) return;
 
@@ -2559,13 +2568,13 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
         }
         n = snprintf(buf, blen,
             "{\"ok\":true,\"version\":\"%s\",\"enabled\":%s,"
-            "\"target_uid\":%d,\"hooks_installed\":%d,"
+            "\"target_uid\":%d,\"target_pid\":%d,\"hooks_installed\":%d,"
             "\"nrs_logging\":%d,\"events_total\":%u,"
             "\"events_buffered\":%d,\"events_dropped\":%u,"
             "\"logging_nrs\":[",
             Z9MON_KPM_VERSION,
             g_enabled ? "true" : "false",
-            g_target_uid, g_hooks_installed,
+            g_target_uid, g_target_tgid, g_hooks_installed,
             nr_logging, g_total,
             g_ev_count < MAX_EVENTS ? g_ev_count : MAX_EVENTS,
             g_ev_dropped);
@@ -2601,7 +2610,18 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
     /* ---- uid <n> ---- */
     else if (!strncmp(args, "uid ", 4)) {
         g_target_uid = parse_int(args + 4, 0);
-        n = snprintf(buf, blen, "{\"ok\":true,\"target_uid\":%d}", g_target_uid);
+        g_target_tgid = -1;
+        n = snprintf(buf, blen,
+            "{\"ok\":true,\"target_uid\":%d,\"target_pid\":%d}",
+            g_target_uid, g_target_tgid);
+    }
+
+    /* ---- pid <n> ---- */
+    else if (!strncmp(args, "pid ", 4)) {
+        g_target_tgid = parse_int(args + 4, 0);
+        n = snprintf(buf, blen,
+            "{\"ok\":true,\"target_uid\":%d,\"target_pid\":%d}",
+            g_target_uid, g_target_tgid);
     }
 
     /* ---- enable ---- */
@@ -2683,6 +2703,7 @@ static long svc_init(const char *args, const char *event, void *__user reserved)
 
     g_enabled = 0;
     g_target_uid = -1;
+    g_target_tgid = -1;
     g_ev_head = 0;
     g_ev_tail = 0;
     g_ev_count = 0;

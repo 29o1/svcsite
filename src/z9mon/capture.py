@@ -36,13 +36,13 @@ class CaptureOptions:
     device: str | None
     timeout: float
     key_file: str | None
-    package: str
+    package: str | None
     duration: float
     syscalls: tuple[str, ...]
     target_mode: str
     output: str
-    load_module: str | None
     kpm: str | None = None
+    pid: int | None = None
 
 
 def _module_version(status: dict[str, Any]) -> tuple[int, int]:
@@ -55,14 +55,85 @@ def _module_version(status: dict[str, Any]) -> tuple[int, int]:
 
 
 def _require_module_version(status: dict[str, Any]) -> None:
-    if _module_version(status) < (1, 4):
+    if _module_version(status) < (1, 5):
         version = str(status.get("version", ""))
         raise Z9MonError(
             "MODULE_VERSION_UNSUPPORTED",
             "loaded KPM is too old for this CLI; converge the module with --kpm",
             EXIT_KPM,
-            {"loaded_version": version or None, "required_version": "1.4.0"},
+            {"loaded_version": version or None, "required_version": "1.5.0"},
         )
+
+
+def _select_target(options: CaptureOptions) -> tuple[str, str | int]:
+    selectors = [
+        (kind, value)
+        for kind, value in (
+            ("package", options.package),
+            ("pid", options.pid),
+        )
+        if value is not None
+    ]
+    if len(selectors) != 1:
+        raise Z9MonError(
+            "TARGET_SELECTION_INVALID",
+            "exactly one of package or pid is required",
+            EXIT_USAGE,
+        )
+
+    kind, value = selectors[0]
+    if kind == "package":
+        if not isinstance(value, str) or not _PACKAGE_PATTERN.fullmatch(value):
+            raise Z9MonError(
+                "PACKAGE_INVALID",
+                "package name has an invalid format",
+                EXIT_USAGE,
+                {"package": value},
+            )
+    elif (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 1
+        or value > 2_147_483_647
+    ):
+        raise Z9MonError(
+            "TARGET_SELECTION_INVALID",
+            f"{kind} has an invalid value",
+            EXIT_USAGE,
+            {kind: value},
+        )
+
+    if kind == "pid" and options.target_mode != "attach":
+        raise Z9MonError(
+            "TARGET_MODE_UNSUPPORTED",
+            "pid targets support attach mode only",
+            EXIT_USAGE,
+            {"target": kind, "target_mode": options.target_mode},
+        )
+    return kind, value
+
+
+def _resolve_target(
+    adb: AdbClient,
+    kind: str,
+    value: str | int,
+) -> dict[str, Any]:
+    if kind == "package":
+        package = str(value)
+        return {
+            "kind": kind,
+            "package": package,
+            "uid": adb.package_uid(package),
+        }
+    if kind == "pid":
+        process = adb.process(int(value))
+        return {
+            "kind": kind,
+            "pid": process.pid,
+            "uid": process.uid,
+            "name": process.name,
+        }
+    raise AssertionError(f"unsupported target kind: {kind}")
 
 
 def _wait_for_drain(
@@ -184,13 +255,7 @@ def _compact_warnings(
 
 
 def run_capture(options: CaptureOptions) -> dict[str, Any]:
-    if not _PACKAGE_PATTERN.fullmatch(options.package):
-        raise Z9MonError(
-            "PACKAGE_INVALID",
-            "package name has an invalid format",
-            EXIT_USAGE,
-            {"package": options.package},
-        )
+    target_kind, target_value = _select_target(options)
     adb = AdbClient(timeout=options.timeout)
     serial = adb.resolve_serial(options.device)
     require_root(adb)
@@ -198,28 +263,28 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     controller = KpmController(adb, key.value)
     controller.locate_kpatch()
 
-    module_load: dict[str, Any] | None = None
     module_deploy: dict[str, Any] | None = None
-    if options.load_module:
-        module_load = controller.replace_module(options.load_module)
-    elif options.kpm:
+    if options.kpm:
         module_deploy = controller.ensure_module(options.kpm)
-        if module_deploy["action"] != "current":
-            module_load = module_deploy
     else:
         controller.require_loaded()
 
     initial_status = controller.status()
     _require_module_version(initial_status)
-    uid = adb.package_uid(options.package)
+    target = _resolve_target(adb, target_kind, target_value)
+    uid = int(target["uid"])
     syscall_numbers, syscall_names = _select_syscalls(
         controller,
         options.syscalls,
     )
-    session_dir = create_session_directory(options.output, options.package)
+    target_label = (
+        str(target["package"])
+        if target_kind == "package"
+        else f"{target_kind}-{target_value}"
+    )
+    session_dir = create_session_directory(options.output, target_label)
     events_path = session_dir / "events.bin"
     manifest_path = session_dir / "manifest.json"
-    summary_path = session_dir / "summary.json"
     maps_dir = session_dir / "maps"
     warnings: list[dict[str, Any]] = []
     maps_snapshots: list[dict[str, Any]] = []
@@ -235,6 +300,8 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         adb.truncate_root_file(EVENT_PATH)
         controller.clear()
         controller.set_uid(uid)
+        if target_kind == "pid":
+            controller.set_pid(int(target["pid"]))
         configured = controller.set_nrs(syscall_numbers)
         if int(configured.get("skipped", 0)) != 0:
             raise Z9MonError(
@@ -244,14 +311,15 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 {"response": configured},
             )
 
-        if options.target_mode == "restart":
-            adb.force_stop(options.package)
+        package = target.get("package")
+        if options.target_mode == "restart" and isinstance(package, str):
+            adb.force_stop(package)
 
-        controller.start()
         monitoring_started = True
-        if options.target_mode in {"launch", "restart"}:
-            launch_result = adb.launch_package(options.package)
-        elif not adb.package_pids(options.package):
+        controller.start()
+        if options.target_mode in {"launch", "restart"} and isinstance(package, str):
+            launch_result = adb.launch_package(package)
+        elif isinstance(package, str) and not adb.package_pids(package):
             warnings.append(
                 {
                     "code": "TARGET_NOT_RUNNING",
@@ -267,6 +335,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 maps_dir=maps_dir,
                 snapshot_id="post-launch",
                 warnings=warnings,
+                only_pids={int(target["pid"])} if target_kind == "pid" else None,
                 wait_seconds=1.5
                 if options.target_mode in {"launch", "restart"}
                 else 0.0,
@@ -290,6 +359,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 maps_dir=maps_dir,
                 snapshot_id="pre-stop",
                 warnings=warnings,
+                only_pids={int(target["pid"])} if target_kind == "pid" else None,
             )
         )
     finally:
@@ -304,7 +374,6 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         syscall_names,
         kernel_dropped=int(final_status.get("events_dropped", 0)),
     )
-    write_json(summary_path, summary)
 
     ended_at = utc_now()
     target_pids = sorted(observed_pids)
@@ -353,8 +422,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             "kernel_release": _shell_value(adb, "uname -r"),
         },
         "target": {
-            "package": options.package,
-            "uid": uid,
+            **target,
             "observed_pids": target_pids,
             "mapped_pids": mapped_pids,
         },
@@ -367,17 +435,16 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         "module": {
             "name": MODULE_NAME,
             "version": final_status.get("version"),
-            "load": module_load,
             "deploy": module_deploy,
             "final_status": final_status,
         },
+        "summary": summary,
         "artifacts": {
             "events": {
                 "path": str(events_path),
                 "size": events_path.stat().st_size,
                 "sha256": sha256_file(events_path),
             },
-            "summary": {"path": str(summary_path)},
             "maps": {
                 "directory": maps_directory,
                 "snapshot_count": len(maps_snapshots),
@@ -392,13 +459,14 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         "session_id": session_dir.name,
         "session": str(session_dir),
         "device": serial,
-        "package": options.package,
+        "target": target,
+        "package": target.get("package"),
+        "pid": target.get("pid"),
         "uid": uid,
         "summary": summary,
         "artifacts": {
             "manifest": str(manifest_path),
             "events": str(events_path),
-            "summary": str(summary_path),
             "maps": maps_directory,
         },
         "warnings": _compact_warnings(warnings),

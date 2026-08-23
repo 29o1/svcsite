@@ -4,8 +4,12 @@ import argparse
 from typing import Any
 
 from z9mon.capture import CaptureOptions, run_capture
-from z9mon.commands._common import add_common_options, flatten_values, positive_timeout
-from z9mon.config import resolve_kpm_path
+from z9mon.commands._common import (
+    add_common_options,
+    flatten_values,
+    positive_integer,
+    positive_timeout,
+)
 
 NAME = "capture"
 
@@ -16,7 +20,13 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         help="run one bounded syscall capture and save a session",
     )
     add_common_options(parser)
-    parser.add_argument("--package", required=True, help="Android package name")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--package", help="Android package name")
+    target.add_argument(
+        "--pid",
+        type=positive_integer,
+        help="exact process ID/TGID to monitor (attach mode only)",
+    )
     parser.add_argument(
         "--duration",
         type=positive_timeout,
@@ -44,15 +54,10 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         help="session output directory (default: ./captures)",
     )
     parser.add_argument(
-        "--load-module",
-        help="explicitly replace/load the KPM from this local absolute or relative path",
-    )
-    parser.add_argument(
         "--kpm",
         help=(
             "converge the loaded KPM to this local module file; "
-            "replacement is skipped when the deployed sha256 already matches "
-            "(also read from config kpm_path)"
+            "replacement is skipped when the deployed sha256 already matches"
         ),
     )
 
@@ -72,7 +77,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             syscalls=flatten_values(args.syscall),
             target_mode=args.target_mode,
             output=args.output,
-            load_module=args.load_module,
-            kpm=resolve_kpm_path(args.kpm),
+            kpm=args.kpm,
+            pid=args.pid,
         )
     )

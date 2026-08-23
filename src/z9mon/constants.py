@@ -1,6 +1,5 @@
 RESULT_SCHEMA = "z9mon.result.v1"
-SESSION_SCHEMA = "z9mon.session.v1"
-SUMMARY_SCHEMA = "z9mon.summary.v1"
+SESSION_SCHEMA = "z9mon.session.v2"
 MODULES_SCHEMA = "z9mon.modules.v1"
 BENCH_SCHEMA = "z9mon.bench.v1"
 MODULE_NAME = "z9null_monitor"

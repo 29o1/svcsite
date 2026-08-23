@@ -5,6 +5,7 @@ from z9mon.adb import (
     AdbClient,
     parse_adb_devices,
     parse_package_uid,
+    parse_processes,
     parse_uid_processes,
 )
 
@@ -68,6 +69,16 @@ List of devices attached
 
         self.assertEqual([process.pid for process in processes], [101, 102])
         self.assertEqual(processes[1].name, "io.target:remote")
+
+    def test_parses_process_for_exact_pid_lookup(self) -> None:
+        processes = parse_processes(
+            "PID UID NAME\n1687 0 oracle\n2010 10300 io.target:worker\n"
+        )
+
+        self.assertEqual(
+            [(process.pid, process.uid, process.name) for process in processes],
+            [(1687, 0, "oracle"), (2010, 10300, "io.target:worker")],
+        )
 
 
 if __name__ == "__main__":

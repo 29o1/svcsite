@@ -1,14 +1,14 @@
 ---
 name: z9mon
-description: Use when analyzing Android app runtime behavior at the syscall level on a rooted arm64 device — attributing file/network/proc access to specific native libraries, ranking syscall callsites inside one .so, verifying which process or thread performs an action, or capturing bounded syscall evidence for reverse-engineering conclusions. Provides deterministic JSON CLI output designed for agent consumption.
+description: Use when analyzing Android app runtime behavior at the syscall level on a rooted arm64 device — attributing file, network, or proc access to processes, threads, native modules, and module offsets through bounded syscall capture and query results designed for agent consumption.
 ---
 
 # z9mon — Android syscall 动态证据 CLI
 
-对目标 app（按 UID 过滤）采集 syscall 事件，把 PC/返回地址/FP 回溯解析到
-`.so` 模块和偏移，产出可离线复查的会话。证据到模块/偏移为止，无符号名。
-验证基线：Pixel 6 / Android 14 / arm64-v8a + root + KernelPatch + SuperKey
-（`~/.config/z9mon/superkey`，0600）。
+对目标 app 或精确 PID 采集 syscall 事件，把 PC、返回地址和 FP 回溯解析到
+`.so` 模块及偏移。证据到模块偏移为止，不提供符号名。
+
+验证基线：Pixel 6 / Android 14 / arm64-v8a + root + KernelPatch + SuperKey。
 
 ```bash
 # 仓库内运行
@@ -17,35 +17,31 @@ PYTHONPATH=src python3 -m z9mon <command> --json
 z9mon <command> --json
 ```
 
----
+如果 `z9mon` 不在 `PATH`，定位本仓库后用绝对 `PYTHONPATH` 调用，或报告工具
+不可用。不要读取 SuperKey 内容，也不要退回到裸 `kpatch kpm ctl0`。
 
-## 工作流
+## 唯一工作流
 
-**采集是唯一写操作，查询纯离线读。**
+`capture` 是任务级写操作，`query` 是纯离线读操作：
 
-```
-doctor/status（只读预检）
-  → capture（改变设备状态）
-    → query stats（总览）
-      → query events + 过滤（定位现象）
-        → query callsites --module-id（归因到库）
-          → address resolve（验证单个地址）
+```text
+doctor/status（按需预检） → capture → query
 ```
 
 ### 1. 预检
 
 ```bash
-PYTHONPATH=src python3 -m z9mon doctor --device SERIAL --json   # 全链路体检
-PYTHONPATH=src python3 -m z9mon status --device SERIAL --json   # 模块状态
+z9mon doctor --device SERIAL --json
+z9mon status --device SERIAL --json
 ```
 
-看 `data.status`：`enabled` 应为 false、`events_buffered` 应为 0。
-`status`/`stop` 可安全重试。
+`status` 和 `stop` 可安全重试。正常空闲状态是 `enabled == false` 且
+`events_buffered == 0`。
 
 ### 2. 采集
 
 ```bash
-PYTHONPATH=src python3 -m z9mon capture \
+z9mon capture \
   --device SERIAL \
   --package com.example.app \
   --duration 15 \
@@ -54,106 +50,107 @@ PYTHONPATH=src python3 -m z9mon capture \
   --json
 ```
 
-- `--target-mode`：`launch`（冷启动）/ `attach`（附加运行中）/ `restart`（强停再启）。
-- 结果取 `data.session`，产物：`manifest.json`、`events.bin`、`summary.json`、
-  `maps/`（映射快照，地址解析直接读它）。
-- `MAPS_UNAVAILABLE` 警告不影响 syscall 证据有效性。
+- `--package PKG` 和 `--pid PID` 二选一。
+- PID 是精确 TGID 过滤，只支持默认的 `attach` 模式。
+- package 可使用 `attach`、`launch` 或 `restart`。
+- 结果中的 `data.session` 是绝对 session 路径。
+- session 只有 `manifest.json`、`events.bin` 和 `maps/`；摘要在
+  `manifest.json` 的 `summary` 字段中。
+- maps 获取失败只产生 warning，不影响已经采集的 syscall 证据。
+
+如果 capture 返回 `MODULE_NOT_LOADED` 或 `MODULE_VERSION_UNSUPPORTED`，且能确定
+当前仓库 KPM 的绝对路径，则用同一条 capture 加上
+`--kpm /absolute/path/to/z9null_monitor.kpm` 重试一次。该参数按 sha256 收敛，
+已一致时不会替换。不要猜测 KPM 路径，也不要主动绕过显式加载。
 
 ### 3. 查询
 
 ```bash
-S=/absolute/path/to/SESSION
-
-# 总览：by_syscall / by_module / quality（先看这个）
-PYTHONPATH=src python3 -m z9mon query $S --mode stats --json
-
-# 过滤事件
-PYTHONPATH=src python3 -m z9mon query $S \
-  --syscall openat --contains /proc/ --limit 20 --json
-
-# 调用点归因：某库内按频次排名
-PYTHONPATH=src python3 -m z9mon query $S \
-  --mode callsites --module-id MODULE_ID --json
-
-# 单地址解析
-PYTHONPATH=src python3 -m z9mon address resolve $S \
-  --pid PID --address 0xADDRESS --json
+z9mon query /absolute/path/to/SESSION \
+  --syscall openat,read \
+  --contains /proc/ \
+  --limit 20 \
+  --json
 ```
 
-`module_id` 从 `stats` 的 `by_module` 或事件 `resolved` 字段拿，形如
-`file:fe:31:62129:/data/app/.../libaegon.so`。
+一次 query 固定返回：
 
----
+- `events`：具体 syscall、进程/线程、参数和已解析回溯；
+- `callsites`：按频次排列的 syscall × module × module_offset；
+- `counts`：匹配数、返回数和截断数；
+- `quality`：内核丢弃、序列缺口和解析器状态。
 
-## 事件字段
+`--limit` 默认 20，同时约束 `events` 和 `callsites`。还可用 `--pid`、`--tid`
+或 `--module-id` 缩小结果。`module_id` 从首次查询的 event resolved 字段或
+callsites 中取得：
+
+```bash
+z9mon query "$S" --module-id "$MID" --limit 20 --json
+```
+
+## 逆向分析要点
 
 ```text
-process.pid / tid / comm        哪个进程哪个线程
-registers.caller_callsite       系统调用返回地址-4（通常是 libc syscall 包装）
-registers.caller_callsite_resolved.module_offset    libc 偏移（单对象）
-backtrace_callsites_resolved[]  FP 链：caller 之上的模块+偏移（JNI/自研库在这层）
-description                     解码后的参数（路径、flags 等）
+events[].process.pid / tid / comm        哪个进程、线程
+events[].description                     syscall 参数，如路径和 flags
+events[].registers.caller_callsite       原始返回地址 - 4
+events[].backtrace_callsites_resolved[]  FP 链上的模块和偏移
+callsites[]                               高频 syscall 调用点
 ```
 
-判断"哪个库发起的调用"：看 `backtrace_callsites_resolved` 里最深的非 libc
-模块；`module_offset` 是地址级证据，可直接对接静态分析。
+判断哪个库发起调用时，优先看 `backtrace_callsites_resolved` 中最深的非 libc
+模块。把 `module_id` 和 `module_offset` 交给静态分析工具继续定位。`module` 只是
+展示名；不同 APK 或库可能同名，比较映射时必须使用 `module_id` 或完整 `path`。
 
----
+原始 `caller` 和 backtrace 值是 ARM64 返回地址；派生 callsite 已减 4。不要把
+syscall PC 当作返回地址。
 
-## 任务配方
+## 常用任务
 
-**A. 某路径被谁访问**：
+查某路径由谁访问：
 
 ```bash
 z9mon capture --device S --package PKG --duration 15 --target-mode launch --json
-z9mon query $S --syscall openat --contains /proc/meminfo --limit 10 --json
-# 读 events[].backtrace_callsites_resolved[].module
+z9mon query "$S" --syscall openat --contains /proc/meminfo --limit 10 --json
 ```
 
-**B. 某库在做什么、调用点在哪**：
+查某个库的高频调用点：
 
 ```bash
-z9mon query $S --mode stats --json          # by_module 找 module_id
-z9mon query $S --mode callsites --module-id "$MID" --json
-# callsites[] 按 count 降序：syscall × module_offset × 次数 × 采样地址
+z9mon query "$S" --limit 20 --json
+z9mon query "$S" --module-id "$MID" --limit 20 --json
 ```
 
-**C. 验证静态分析中的地址**：
+采集独立 root 进程：
 
 ```bash
-z9mon address resolve $S --pid PID --address 0x74fbe2b5d4 --json
-# mapping.module / module_offset / permissions / snapshot_id
+z9mon capture --device S --pid PID --duration 10 \
+  --syscall openat,read,connect,sendto --json
+z9mon query "$S" --pid PID --limit 20 --json
 ```
 
-**D. 判断证据质量**（下结论前必查）：
+下结论前检查：
 
 ```text
-query stats: quality.parser.invalid_records == 0   解析无坏记录
-query stats: quality.sequence.gaps == 0             事件无缺口
-capture 结果: summary.kernel_dropped == 0           内核无丢弃
-三者同时成立，事件数才是可信的总量。
+quality.kernel_dropped == 0
+quality.sequence.gaps == 0
+quality.parser.invalid_records == 0
 ```
-
----
 
 ## 错误处置
 
 | code | 动作 |
 |---|---|
-| `MODULE_NOT_LOADED` | capture 时加 `--kpm /abs/z9null_monitor.kpm` 收敛 |
+| `MODULE_NOT_LOADED` | capture 加已知的绝对 `--kpm` 路径后重试 |
 | `MODULE_VERSION_UNSUPPORTED` | 同上 |
-| `SYSCALL_UNSUPPORTED` | 换预设或去掉该 syscall，不枚举试探 |
-| `MAPS_UNAVAILABLE` | 仅警告，继续查询 |
-| `SUPERKEY_*` / `DEVICE_*` | 原样报给用户 |
-| `USAGE_ERROR` | 修参数 |
-
----
+| `SYSCALL_UNSUPPORTED` | 去掉该 syscall，不枚举试探 |
+| `MAPS_UNAVAILABLE` | 仅 warning，继续查询 syscall 证据 |
+| `SUPERKEY_*` / `DEVICE_*` | 原样报告给用户 |
+| `USAGE_ERROR` | 修正参数 |
 
 ## 约定
 
-- Agent 调用一律 `--json`；stdout 恰好一个 JSON 对象。
-- 不把 SuperKey 打印、记录或写入产物。
-- 查询有界：默认 limit 20，优先 `--mode stats`，不直接读 `events.bin`。
-- 模块对比用 `module_id` 或完整 `path`；`module` 只是展示名，同名 so 会撞。
-- 保留原始运行时地址；`callsite` 已减 4，不要把 syscall PC 当返回地址。
-- 模块部署默认 `--kpm` 收敛（sha256 相同跳过）；`--load-module` 无条件替换。
+- Agent 调用一律使用 `--json`；stdout 必须恰好一个 JSON 对象。
+- 不打印、记录或写入 SuperKey。
+- 不直接读取或解析 `events.bin`，使用有界 `query`。
+- capture 必须以 monitoring disabled 且 `events_buffered == 0` 结束。

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import json
 import os
 from pathlib import Path
 import stat
@@ -11,7 +10,6 @@ from z9mon.errors import EXIT_CONFIG, Z9MonError
 
 
 DEFAULT_KEY_FILE = Path("~/.config/z9mon/superkey").expanduser()
-DEFAULT_CONFIG_FILE = Path("~/.config/z9mon/config.json").expanduser()
 
 
 @dataclass(frozen=True)
@@ -93,52 +91,6 @@ def _read_key_file(path: Path) -> SuperKey:
         ) from exc
 
     return _validate_value(value, f"file:{path}")
-
-
-def read_config(
-    config_file: str | os.PathLike[str] | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    """Read the optional JSON config file; missing files are empty configs."""
-
-    env = os.environ if environ is None else environ
-    configured = config_file or env.get("Z9MON_CONFIG")
-    path = Path(configured).expanduser() if configured else DEFAULT_CONFIG_FILE
-    if not path.exists():
-        return {}
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise Z9MonError(
-            "CONFIG_INVALID",
-            "config file could not be read",
-            EXIT_CONFIG,
-            {"path": str(path), "reason": str(exc)},
-        ) from exc
-    if not isinstance(loaded, dict):
-        raise Z9MonError(
-            "CONFIG_INVALID",
-            "config file must contain a JSON object",
-            EXIT_CONFIG,
-            {"path": str(path)},
-        )
-    return loaded
-
-
-def resolve_kpm_path(
-    explicit: str | None,
-    *,
-    config_file: str | os.PathLike[str] | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> str | None:
-    """Resolve the converge target: --kpm wins, then config kpm_path."""
-
-    if explicit and explicit.strip():
-        return explicit.strip()
-    configured = read_config(config_file, environ).get("kpm_path")
-    if isinstance(configured, str) and configured.strip():
-        return configured.strip()
-    return None
 
 
 def read_superkey(

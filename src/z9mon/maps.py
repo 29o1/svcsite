@@ -423,36 +423,3 @@ class ModuleIndex:
             "file_offset": hex_str(file_offset),
             "permissions": mapping.get("permissions"),
         }
-
-
-def require_module_index(session_dir: Path) -> ModuleIndex:
-    index = ModuleIndex.from_session(session_dir)
-    if index is None:
-        raise Z9MonError(
-            "MODULES_NOT_FOUND",
-            "session has no modules.json and no maps directory",
-            EXIT_DATA,
-            {"session": str(session_dir)},
-        )
-    return index
-
-
-def run_address_resolve(
-    *,
-    session: str,
-    pid: int,
-    address: int,
-) -> dict[str, Any]:
-    from z9mon.session import resolve_session
-
-    session_dir, _, _ = resolve_session(session)
-    index = require_module_index(session_dir)
-    resolved = index.resolve(pid, address)
-    return {
-        "session": str(session_dir),
-        "source": str(index.source),
-        "pid": pid,
-        "address": hex_str(address),
-        "resolved": resolved is not None,
-        "mapping": resolved,
-    }

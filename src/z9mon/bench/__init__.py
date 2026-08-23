@@ -20,7 +20,7 @@ from z9mon.bench.metrics import (
     percentile,
 )
 from z9mon.bench.quality import compute_quality_metrics
-from z9mon.bench.run import BenchOptions, run_bench, time_query_mode
+from z9mon.bench.run import BenchOptions, run_bench, time_query
 
 __all__ = [
     "BenchOptions",
@@ -35,5 +35,5 @@ __all__ = [
     "render_compare_table",
     "run_bench",
     "run_compare",
-    "time_query_mode",
+    "time_query",
 ]

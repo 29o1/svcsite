@@ -25,18 +25,6 @@ def positive_integer(value: str) -> int:
     return number
 
 
-def address_value(value: str) -> int:
-    try:
-        address = int(value, 0)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "address must be a decimal or 0x-prefixed hexadecimal integer"
-        ) from exc
-    if address <= 0:
-        raise argparse.ArgumentTypeError("address must be greater than zero")
-    return address
-
-
 def flatten_values(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(
         item.strip()

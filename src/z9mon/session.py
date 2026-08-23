@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 from typing import Any, Mapping
 
-from z9mon.constants import SESSION_SCHEMA, SUMMARY_SCHEMA
+from z9mon.constants import SESSION_SCHEMA
 from z9mon.errors import EXIT_DATA, Z9MonError
 from z9mon.protocol import open_event_stream
 
@@ -19,15 +19,15 @@ def utc_now() -> str:
     )
 
 
-def create_session_directory(output_root: str | Path, package: str) -> Path:
+def create_session_directory(output_root: str | Path, target_label: str) -> Path:
     root = Path(output_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
-    safe_package = "".join(
+    safe_target = "".join(
         character if character.isalnum() or character in "._-" else "_"
-        for character in package
+        for character in target_label
     )
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    path = root / f"{timestamp}-{safe_package}"
+    path = root / f"{timestamp}-{safe_target}"
     path.mkdir(mode=0o700)
     return path
 
@@ -91,7 +91,6 @@ def summarize_event_file(
 
     return (
         {
-            "schema_version": SUMMARY_SCHEMA,
             "event_count": parser_quality["events"],
             "kernel_dropped": kernel_dropped,
             "sequence": {"gaps": gaps, "missing": missing},

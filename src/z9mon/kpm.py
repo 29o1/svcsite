@@ -129,8 +129,7 @@ class KpmController:
                 {
                     "module": MODULE_NAME,
                     "hint": (
-                        "deploy once with capture --kpm PATH (skip when current) "
-                        "or --load-module PATH (force replacement)"
+                        "deploy once with capture --kpm PATH; matching builds are skipped"
                     ),
                 },
             )
@@ -320,6 +319,9 @@ class KpmController:
 
     def set_uid(self, uid: int) -> dict[str, Any]:
         return self.ctl0(f"uid {uid}")
+
+    def set_pid(self, pid: int) -> dict[str, Any]:
+        return self.ctl0(f"pid {pid}")
 
     def set_nrs(self, syscall_numbers: list[int]) -> dict[str, Any]:
         encoded = ",".join(str(number) for number in syscall_numbers)

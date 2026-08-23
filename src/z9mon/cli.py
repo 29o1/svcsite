@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from typing import Sequence
 
@@ -39,17 +38,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if argument_list and argument_list[0] in modules
         else "cli"
     )
-    if operation == "address" and "resolve" in argument_list:
-        operation = "address.resolve"
-    jsonl = operation == "query" and "jsonl" in argument_list
-    compact = "--json" in argument_list or jsonl
+    compact = "--json" in argument_list
 
     try:
         args = parser.parse_args(argument_list)
         module = modules[args.command]
         operation = module.operation(args)
-        jsonl = args.command == "query" and args.format == "jsonl"
-        compact = args.json or jsonl
+        compact = args.json
         data = module.run(args)
         payload = success_payload(operation, data)
         exit_code = 0
@@ -70,17 +65,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = error_payload(operation, error)
         exit_code = error.exit_code
 
-    if jsonl and exit_code == 0:
-        for event in payload["data"]["events"]:
-            sys.stdout.write(
-                json.dumps(
-                    event,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
-            )
-            sys.stdout.write("\n")
-    else:
-        write_payload(payload, sys.stdout, compact=compact)
+    write_payload(payload, sys.stdout, compact=compact)
     return exit_code

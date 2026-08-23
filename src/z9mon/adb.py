@@ -53,16 +53,24 @@ def parse_adb_devices(output: str) -> dict[str, str]:
     return devices
 
 
-def parse_uid_processes(output: str, target_uid: int) -> list[ProcessInfo]:
+def parse_processes(output: str) -> list[ProcessInfo]:
     processes: list[ProcessInfo] = []
     for raw_line in output.splitlines():
         fields = raw_line.strip().split(maxsplit=2)
         if len(fields) < 3 or not fields[0].isdecimal() or not fields[1].isdecimal():
             continue
         pid, uid = int(fields[0]), int(fields[1])
-        if pid > 0 and uid == target_uid:
+        if pid > 0:
             processes.append(ProcessInfo(pid=pid, uid=uid, name=fields[2]))
     return sorted(processes, key=lambda process: process.pid)
+
+
+def parse_uid_processes(output: str, target_uid: int) -> list[ProcessInfo]:
+    return [
+        process
+        for process in parse_processes(output)
+        if process.uid == target_uid
+    ]
 
 
 class AdbClient:
@@ -307,6 +315,25 @@ class AdbClient:
                 {"uid": uid, "stderr": result.stderr.strip()},
             )
         return parse_uid_processes(result.stdout, uid)
+
+    def process(self, pid: int) -> ProcessInfo:
+        result = self.shell("ps -A -o PID,UID,NAME\n")
+        if result.returncode != 0:
+            raise Z9MonError(
+                "PROCESS_LIST_FAILED",
+                "failed to list Android processes",
+                EXIT_DEVICE,
+                {"pid": pid, "stderr": result.stderr.strip()},
+            )
+        for process in parse_processes(result.stdout):
+            if process.pid == pid:
+                return process
+        raise Z9MonError(
+            "PROCESS_NOT_FOUND",
+            "target process was not found",
+            EXIT_DEVICE,
+            {"pid": pid},
+        )
 
     def read_process_maps(self, pid: int) -> str:
         result = self.root_shell(f"cat /proc/{pid}/maps")

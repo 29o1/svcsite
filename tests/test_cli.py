@@ -7,12 +7,10 @@ from z9mon.cli import main
 
 
 class CliTests(unittest.TestCase):
-    def test_jsonl_rejects_aggregate_mode_with_one_line_error(self) -> None:
+    def test_removed_query_mode_is_a_one_line_usage_error(self) -> None:
         stream = io.StringIO()
         with redirect_stdout(stream):
-            exit_code = main(
-                ["query", "/missing", "--stats", "--format", "jsonl"]
-            )
+            exit_code = main(["query", "/missing", "--mode", "stats", "--json"])
 
         self.assertEqual(stream.getvalue().count("\n"), 1)
         payload = json.loads(stream.getvalue())
@@ -28,6 +26,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["operation"], "doctor")
+        self.assertEqual(payload["error"]["code"], "USAGE_ERROR")
+
+    def test_capture_requires_exactly_one_target(self) -> None:
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            exit_code = main(
+                ["capture", "--package", "io.target", "--pid", "1687", "--json"]
+            )
+
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(exit_code, 2)
         self.assertEqual(payload["error"]["code"], "USAGE_ERROR")
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 from z9mon.bench import BenchOptions, render_compare_table, run_bench, run_compare
 from z9mon.commands._common import (
@@ -10,15 +10,15 @@ from z9mon.commands._common import (
     positive_integer,
     positive_timeout,
 )
-from z9mon.config import resolve_kpm_path
+from z9mon.errors import EXIT_INTERNAL, Z9MonError
+from z9mon.output import error_payload, success_payload, write_payload
 
-NAME = "bench"
+def build_parser() -> argparse.ArgumentParser:
+    from z9mon.cli import Z9MonArgumentParser
 
-
-def add_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        NAME,
-        help="benchmark capture quality and query performance",
+    parser = Z9MonArgumentParser(
+        prog="z9mon-bench",
+        description="development benchmark for capture quality and query performance",
     )
     bench_subparsers = parser.add_subparsers(
         dest="bench_command",
@@ -87,10 +87,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="emit one compact JSON object",
     )
-
-
-def operation(args: argparse.Namespace) -> str:
-    return f"{NAME}.{args.bench_command}"
+    return parser
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -101,7 +98,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 timeout=args.timeout,
                 key_file=args.key_file,
                 package=args.package,
-                kpm=resolve_kpm_path(args.kpm),
+                kpm=args.kpm,
                 duration=args.duration,
                 trials=args.trials,
                 output=args.output,
@@ -113,3 +110,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     comparison = run_compare(args.baseline, args.candidate)
     sys.stderr.write(render_compare_table(comparison) + "\n")
     return comparison
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    argument_list = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    operation_name = (
+        f"bench.{argument_list[0]}" if argument_list else "bench"
+    )
+    compact = "--json" in argument_list
+    try:
+        args = parser.parse_args(argument_list)
+        operation_name = f"bench.{args.bench_command}"
+        compact = args.json
+        payload = success_payload(operation_name, run(args))
+        exit_code = 0
+    except Z9MonError as exc:
+        payload = error_payload(operation_name, exc)
+        exit_code = exc.exit_code
+    except KeyboardInterrupt:
+        error = Z9MonError("INTERRUPTED", "operation was interrupted", 130)
+        payload = error_payload(operation_name, error)
+        exit_code = error.exit_code
+    except Exception as exc:
+        error = Z9MonError(
+            "INTERNAL_ERROR",
+            "unexpected internal error",
+            EXIT_INTERNAL,
+            {"exception": type(exc).__name__},
+        )
+        payload = error_payload(operation_name, error)
+        exit_code = error.exit_code
+    write_payload(payload, sys.stdout, compact=compact)
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

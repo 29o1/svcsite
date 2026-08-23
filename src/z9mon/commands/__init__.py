@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from z9mon.commands import (
-    address,
-    bench,
     capture,
     doctor,
     query,
@@ -10,4 +8,4 @@ from z9mon.commands import (
     stop,
 )
 
-COMMAND_MODULES = (doctor, status, stop, capture, query, address, bench)
+COMMAND_MODULES = (doctor, status, stop, capture, query)

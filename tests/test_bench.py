@@ -16,7 +16,7 @@ from z9mon.bench import (
     percentile,
     render_compare_table,
 )
-from z9mon.cli import main
+from z9mon.commands.bench import main as bench_main
 from z9mon.constants import BENCH_SCHEMA, MODULES_SCHEMA
 
 
@@ -46,13 +46,14 @@ def write_session(directory: Path) -> Path:
         + make_event(seq=2, tgid=100, backtrace=(0x5000, 0x6000))
         + make_event(seq=3, nr=63, tgid=100, backtrace=(0x9000,))
     )
-    (session / "manifest.json").write_text("{}", encoding="utf-8")
-    (session / "summary.json").write_text(
+    (session / "manifest.json").write_text(
         json.dumps(
             {
-                "kernel_dropped": 0,
-                "sequence": {"gaps": 0, "missing": 0},
-                "parser": {"invalid_records": 0, "skipped_bytes": 0},
+                "summary": {
+                    "kernel_dropped": 0,
+                    "sequence": {"gaps": 0, "missing": 0},
+                    "parser": {"invalid_records": 0, "skipped_bytes": 0},
+                },
             }
         ),
         encoding="utf-8",
@@ -150,7 +151,7 @@ def make_report(
 
 BASELINE_AGGREGATE = {
     "performance": {
-        "query_events_p50_ms": 900.0,
+        "query_p50_ms": 900.0,
         "capture_wall_p50_s": 42.0,
     },
     "evidence": {
@@ -186,21 +187,17 @@ class AggregateNoiseTests(unittest.TestCase):
                 "integrity": {"kernel_dropped": 0},
             },
         ]
-        timings = {
-            "events": {
-                "p50_ms": 61.0,
-                "p95_ms": 90.0,
-                "timings_ms": [58, 60, 61, 62, 90],
-            }
+        timing = {
+            "p50_ms": 61.0,
+            "p95_ms": 90.0,
+            "timings_ms": [58, 60, 61, 62, 90],
         }
 
-        aggregate, noise = _aggregate(trials, timings, 10000)
+        aggregate, noise = _aggregate(trials, timing, 10000)
 
-        self.assertEqual(noise["performance.query_events_p50_ms"], 29.0)
-        self.assertEqual(noise["performance.query_events_per_10k_ms"], 29.0)
-        self.assertEqual(
-            aggregate["performance"]["query_events_per_10k_ms"], 61.0
-        )
+        self.assertEqual(noise["performance.query_p50_ms"], 29.0)
+        self.assertEqual(noise["performance.query_per_10k_ms"], 29.0)
+        self.assertEqual(aggregate["performance"]["query_per_10k_ms"], 61.0)
 
 
 class CompareTests(unittest.TestCase):
@@ -209,7 +206,7 @@ class CompareTests(unittest.TestCase):
             {
                 **BASELINE_AGGREGATE,
                 "performance": {
-                    "query_events_p50_ms": 600.0,
+                    "query_p50_ms": 600.0,
                     "capture_wall_p50_s": 42.0,
                 },
                 "evidence": {
@@ -225,7 +222,7 @@ class CompareTests(unittest.TestCase):
 
         by_metric = {row["metric"]: row for row in comparison["rows"]}
         self.assertEqual(
-            by_metric["performance.query_events_p50_ms"]["verdict"], "improved"
+            by_metric["performance.query_p50_ms"]["verdict"], "improved"
         )
         self.assertEqual(
             by_metric["evidence.callsite_resolve_rate"]["verdict"], "improved"
@@ -261,7 +258,7 @@ class CompareTests(unittest.TestCase):
         candidate = make_report(
             {
                 **BASELINE_AGGREGATE,
-                "performance": {"query_events_p50_ms": 1200.0},
+                "performance": {"query_p50_ms": 1200.0},
                 "evidence": {
                     "callsite_resolve_rate": 0.70,
                     "unique_callsites": 120,
@@ -274,7 +271,7 @@ class CompareTests(unittest.TestCase):
 
         by_metric = {row["metric"]: row for row in comparison["rows"]}
         self.assertEqual(
-            by_metric["performance.query_events_p50_ms"]["verdict"], "regressed"
+            by_metric["performance.query_p50_ms"]["verdict"], "regressed"
         )
         self.assertEqual(
             by_metric["performance.capture_wall_p50_s"]["verdict"], "missing"
@@ -332,9 +329,8 @@ class CompareCliTests(unittest.TestCase):
             stream = io.StringIO()
             with redirect_stdout(stream):
                 with patch("sys.stderr", new=io.StringIO()):
-                    exit_code = main(
+                    exit_code = bench_main(
                         [
-                            "bench",
                             "compare",
                             str(baseline_path),
                             str(candidate_path),
@@ -352,8 +348,8 @@ class CompareCliTests(unittest.TestCase):
         stream = io.StringIO()
         with redirect_stdout(stream):
             with patch("sys.stderr", new=io.StringIO()):
-                exit_code = main(
-                    ["bench", "compare", "/missing/a.json", "/missing/b.json", "--json"]
+                exit_code = bench_main(
+                    ["compare", "/missing/a.json", "/missing/b.json", "--json"]
                 )
 
         payload = json.loads(stream.getvalue())

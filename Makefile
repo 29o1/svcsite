@@ -18,7 +18,7 @@ kpm:
 	$(MAKE) -C kpm KP_DIR="$(KP_DIR)"
 
 bench:
-	PYTHONPATH=src $(PYTHON) -m z9mon bench run \
+	PYTHONPATH=src $(PYTHON) -m z9mon.commands.bench run \
 	  --package $(BENCH_PACKAGE) \
 	  --kpm $(CURDIR)/kpm/z9null_monitor.kpm \
 	  $(BENCH_DEVICE_FLAG) \

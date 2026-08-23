@@ -91,6 +91,16 @@ class KpmControllerTests(unittest.TestCase):
         self.assertEqual(context.exception.code, "MODULE_NOT_LOADED")
         self.assertIn("--kpm", context.exception.details["hint"])
 
+    def test_sets_exact_pid_filter(self) -> None:
+        adb = FakeAdb([CommandResult(0, '{"ok":true,"target_pid":1687}', "")])
+        controller = KpmController(adb, "test-secret")
+        controller.kpatch_path = "/data/local/tmp/kpatch"
+
+        payload = controller.set_pid(1687)
+
+        self.assertEqual(payload["target_pid"], 1687)
+        self.assertIn("'pid 1687'", adb.commands[0])
+
 
 class EnsureModuleTests(unittest.TestCase):
     def _kpm_file(self, directory: str) -> tuple[Path, str]:

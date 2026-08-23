@@ -1,17 +1,46 @@
 import unittest
 
 from z9mon.capture import (
+    CaptureOptions,
     _compact_warnings,
     _module_version,
     _require_module_version,
+    _resolve_target,
     _select_syscalls,
+    _select_target,
 )
+from z9mon.adb import ProcessInfo
 from z9mon.errors import Z9MonError
 
 
 class FakeController:
     def resolve_syscall(self, name: str) -> int | None:
         return {"write": 64, "getpid": 172}.get(name)
+
+
+class FakeAdb:
+    def package_uid(self, package: str) -> int:
+        return 10300
+
+    def process(self, pid: int) -> ProcessInfo:
+        return ProcessInfo(pid=pid, uid=0, name="oracle")
+
+
+def capture_options(**overrides) -> CaptureOptions:
+    values = {
+        "device": None,
+        "timeout": 15.0,
+        "key_file": None,
+        "package": "io.target",
+        "duration": 1.0,
+        "syscalls": (),
+        "target_mode": "attach",
+        "output": "./captures",
+        "kpm": None,
+        "pid": None,
+    }
+    values.update(overrides)
+    return CaptureOptions(**values)
 
 
 class CaptureSelectionTests(unittest.TestCase):
@@ -59,15 +88,15 @@ class CaptureSelectionTests(unittest.TestCase):
         self.assertEqual(numbers, [56, 64])
         self.assertEqual(names[64], "write")
 
-    def test_rejects_module_older_than_1_4(self) -> None:
+    def test_rejects_module_older_than_1_5(self) -> None:
         with self.assertRaises(Z9MonError) as context:
-            _require_module_version({"version": "1.3.0"})
+            _require_module_version({"version": "1.4.0"})
 
         self.assertEqual(context.exception.code, "MODULE_VERSION_UNSUPPORTED")
         self.assertIn("--kpm", context.exception.message)
 
-    def test_accepts_module_1_4_and_newer(self) -> None:
-        _require_module_version({"version": "1.4.0"})
+    def test_accepts_module_1_5_and_newer(self) -> None:
+        _require_module_version({"version": "1.5.0"})
         _require_module_version({"version": "2.0.1"})
 
     def test_unparseable_version_counts_as_too_old(self) -> None:
@@ -78,6 +107,29 @@ class CaptureSelectionTests(unittest.TestCase):
             _select_syscalls(FakeController(), ("getpid",))
 
         self.assertEqual(context.exception.code, "SYSCALL_UNSUPPORTED")
+
+    def test_selects_exact_pid_target(self) -> None:
+        options = capture_options(package=None, pid=1687)
+
+        self.assertEqual(_select_target(options), ("pid", 1687))
+        self.assertEqual(
+            _resolve_target(FakeAdb(), "pid", 1687),
+            {"kind": "pid", "pid": 1687, "uid": 0, "name": "oracle"},
+        )
+
+    def test_rejects_multiple_targets(self) -> None:
+        with self.assertRaises(Z9MonError) as context:
+            _select_target(capture_options(pid=1687))
+
+        self.assertEqual(context.exception.code, "TARGET_SELECTION_INVALID")
+
+    def test_pid_target_rejects_launch_mode(self) -> None:
+        with self.assertRaises(Z9MonError) as context:
+            _select_target(
+                capture_options(package=None, pid=1687, target_mode="launch")
+            )
+
+        self.assertEqual(context.exception.code, "TARGET_MODE_UNSUPPORTED")
 
 
 if __name__ == "__main__":
