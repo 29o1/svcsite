@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from z9mon.protocol import (
+from svcsite.protocol import (
     EVENT_MAGIC,
     EVENT_VERSION,
     FIXED_RECORD_SIZE,

@@ -3,7 +3,7 @@ import json
 from contextlib import redirect_stdout
 import unittest
 
-from z9mon.cli import main
+from svcsite.cli import main
 
 
 class CliTests(unittest.TestCase):

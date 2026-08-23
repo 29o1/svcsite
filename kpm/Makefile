@@ -39,7 +39,7 @@ CFLAGS = -Wall -O2 -fno-pic -fno-stack-protector \
 
 LDFLAGS = -r
 
-TARGET = z9null_monitor.kpm
+TARGET = svcsite.kpm
 
 all: check-env $(TARGET)
 
@@ -47,12 +47,12 @@ check-env:
 	@test -d "$(KERNEL_DIR)" || (echo "Missing KernelPatch kernel dir: $(KERNEL_DIR)" >&2; exit 1)
 	@test -x "$(CC)" || (echo "Missing Android NDK clang: $(CC)" >&2; exit 1)
 
-$(TARGET): src/z9null_monitor.c
-	$(CC) $(CFLAGS) -c $< -o z9null_monitor.o
-	$(LD) -nostdlib $(LDFLAGS) z9null_monitor.o -o $@
-	rm -f z9null_monitor.o
+$(TARGET): src/svcsite.c
+	$(CC) $(CFLAGS) -c $< -o svcsite.o
+	$(LD) -nostdlib $(LDFLAGS) svcsite.o -o $@
+	rm -f svcsite.o
 
 clean:
-	rm -f $(TARGET) z9null_monitor.o
+	rm -f $(TARGET) svcsite.o
 
 .PHONY: all check-env clean

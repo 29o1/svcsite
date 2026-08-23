@@ -11,8 +11,8 @@ import tempfile
 import unittest
 
 from test_protocol import make_event
-from z9mon.constants import MODULES_SCHEMA
-from z9mon.query import run_query
+from svcsite.constants import MODULES_SCHEMA
+from svcsite.query import run_query
 
 
 COMMON_KEYS = (

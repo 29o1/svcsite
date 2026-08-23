@@ -1,6 +1,6 @@
 import unittest
 
-from z9mon.capture import (
+from svcsite.capture import (
     CaptureOptions,
     _compact_warnings,
     _module_version,
@@ -9,8 +9,8 @@ from z9mon.capture import (
     _select_syscalls,
     _select_target,
 )
-from z9mon.adb import ProcessInfo
-from z9mon.errors import Z9MonError
+from svcsite.adb import ProcessInfo
+from svcsite.errors import SvcSiteError
 
 
 class FakeController:
@@ -89,7 +89,7 @@ class CaptureSelectionTests(unittest.TestCase):
         self.assertEqual(names[64], "write")
 
     def test_rejects_module_older_than_1_5(self) -> None:
-        with self.assertRaises(Z9MonError) as context:
+        with self.assertRaises(SvcSiteError) as context:
             _require_module_version({"version": "1.4.0"})
 
         self.assertEqual(context.exception.code, "MODULE_VERSION_UNSUPPORTED")
@@ -103,7 +103,7 @@ class CaptureSelectionTests(unittest.TestCase):
         self.assertEqual(_module_version({"version": "dev"}), (0, 0))
 
     def test_rejects_untyped_dynamic_syscall_before_capture(self) -> None:
-        with self.assertRaises(Z9MonError) as context:
+        with self.assertRaises(SvcSiteError) as context:
             _select_syscalls(FakeController(), ("getpid",))
 
         self.assertEqual(context.exception.code, "SYSCALL_UNSUPPORTED")
@@ -118,13 +118,13 @@ class CaptureSelectionTests(unittest.TestCase):
         )
 
     def test_rejects_multiple_targets(self) -> None:
-        with self.assertRaises(Z9MonError) as context:
+        with self.assertRaises(SvcSiteError) as context:
             _select_target(capture_options(pid=1687))
 
         self.assertEqual(context.exception.code, "TARGET_SELECTION_INVALID")
 
     def test_pid_target_rejects_launch_mode(self) -> None:
-        with self.assertRaises(Z9MonError) as context:
+        with self.assertRaises(SvcSiteError) as context:
             _select_target(
                 capture_options(package=None, pid=1687, target_mode="launch")
             )

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from z9mon.adb import (
+from svcsite.adb import (
     AdbClient,
     parse_adb_devices,
     parse_package_uid,
@@ -47,7 +47,7 @@ List of devices attached
 """
         self.assertEqual(parse_adb_devices(output), {})
 
-    @patch("z9mon.adb.subprocess.run")
+    @patch("svcsite.adb.subprocess.run")
     def test_root_command_is_sent_over_stdin(self, run_mock) -> None:
         run_mock.return_value.returncode = 0
         run_mock.return_value.stdout = ""

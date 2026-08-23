@@ -1,9 +1,9 @@
 ---
-name: z9mon
+name: svcsite
 description: Use when analyzing Android app runtime behavior at the syscall level on a rooted arm64 device — attributing file, network, or proc access to processes, threads, native modules, and module offsets through bounded syscall capture and query results designed for agent consumption.
 ---
 
-# z9mon — Android syscall 动态证据 CLI
+# svcsite — Android syscall 动态证据 CLI
 
 对目标 app 或精确 PID 采集 syscall 事件，把 PC、返回地址和 FP 回溯解析到
 `.so` 模块及偏移。证据到模块偏移为止，不提供符号名。
@@ -12,12 +12,12 @@ description: Use when analyzing Android app runtime behavior at the syscall leve
 
 ```bash
 # 仓库内运行
-PYTHONPATH=src python3 -m z9mon <command> --json
+PYTHONPATH=src python3 -m svcsite <command> --json
 # 已安装
-z9mon <command> --json
+svcsite <command> --json
 ```
 
-如果 `z9mon` 不在 `PATH`，定位本仓库后用绝对 `PYTHONPATH` 调用，或报告工具
+如果 `svcsite` 不在 `PATH`，定位本仓库后用绝对 `PYTHONPATH` 调用，或报告工具
 不可用。不要读取 SuperKey 内容，也不要退回到裸 `kpatch kpm ctl0`。
 
 ## 唯一工作流
@@ -31,8 +31,8 @@ doctor/status（按需预检） → capture → query
 ### 1. 预检
 
 ```bash
-z9mon doctor --device SERIAL --json
-z9mon status --device SERIAL --json
+svcsite doctor --device SERIAL --json
+svcsite status --device SERIAL --json
 ```
 
 `status` 和 `stop` 可安全重试。正常空闲状态是 `enabled == false` 且
@@ -41,7 +41,7 @@ z9mon status --device SERIAL --json
 ### 2. 采集
 
 ```bash
-z9mon capture \
+svcsite capture \
   --device SERIAL \
   --package com.example.app \
   --duration 15 \
@@ -60,13 +60,13 @@ z9mon capture \
 
 如果 capture 返回 `MODULE_NOT_LOADED` 或 `MODULE_VERSION_UNSUPPORTED`，且能确定
 当前仓库 KPM 的绝对路径，则用同一条 capture 加上
-`--kpm /absolute/path/to/z9null_monitor.kpm` 重试一次。该参数按 sha256 收敛，
+`--kpm /absolute/path/to/svcsite.kpm` 重试一次。该参数按 sha256 收敛，
 已一致时不会替换。不要猜测 KPM 路径，也不要主动绕过显式加载。
 
 ### 3. 查询
 
 ```bash
-z9mon query /absolute/path/to/SESSION \
+svcsite query /absolute/path/to/SESSION \
   --syscall openat,read \
   --contains /proc/ \
   --limit 20 \
@@ -85,7 +85,7 @@ z9mon query /absolute/path/to/SESSION \
 callsites 中取得：
 
 ```bash
-z9mon query "$S" --module-id "$MID" --limit 20 --json
+svcsite query "$S" --module-id "$MID" --limit 20 --json
 ```
 
 ## 逆向分析要点
@@ -110,23 +110,23 @@ syscall PC 当作返回地址。
 查某路径由谁访问：
 
 ```bash
-z9mon capture --device S --package PKG --duration 15 --target-mode launch --json
-z9mon query "$S" --syscall openat --contains /proc/meminfo --limit 10 --json
+svcsite capture --device S --package PKG --duration 15 --target-mode launch --json
+svcsite query "$S" --syscall openat --contains /proc/meminfo --limit 10 --json
 ```
 
 查某个库的高频调用点：
 
 ```bash
-z9mon query "$S" --limit 20 --json
-z9mon query "$S" --module-id "$MID" --limit 20 --json
+svcsite query "$S" --limit 20 --json
+svcsite query "$S" --module-id "$MID" --limit 20 --json
 ```
 
 采集独立 root 进程：
 
 ```bash
-z9mon capture --device S --pid PID --duration 10 \
+svcsite capture --device S --pid PID --duration 10 \
   --syscall openat,read,connect,sendto --json
-z9mon query "$S" --pid PID --limit 20 --json
+svcsite query "$S" --pid PID --limit 20 --json
 ```
 
 下结论前检查：

@@ -10,16 +10,16 @@ This repository contains a locally modified KPM derived from:
 
 The migrated KPM files are:
 
-- `kpm/src/z9null_monitor.c`
+- `kpm/src/svcsite.c`
 - `kpm/Makefile`
 
-The local version renamed `svc_monitor.c` to `z9null_monitor.c` and added
+The local version renamed `svc_monitor.c` to `svcsite.c` and added
 KernelPatch API compatibility fixes, expanded event buffering, binary event
 output, additional syscall argument decoding, and Android-side control
 compatibility. Migrated text files use LF line endings; this normalization does
 not change KPM behavior.
 
-The host-side Python package under `src/z9mon/`, command contract, and
+The host-side Python package under `src/svcsite/`, command contract, and
 Agent-facing documentation are new work in this repository.
 
 This repository's KPM `1.1.0` added stop-and-drain behavior and a small `sysnr`

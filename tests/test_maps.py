@@ -3,8 +3,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from z9mon.constants import MODULES_SCHEMA
-from z9mon.maps import ModuleIndex, parse_proc_maps
+from svcsite.constants import MODULES_SCHEMA
+from svcsite.maps import ModuleIndex, parse_proc_maps
 
 
 MAPS_TEXT = """7000000000-7000010000 r-xp 00001000 103:02 42 /data/app/libtarget.so
@@ -65,6 +65,19 @@ class ProcMapsTests(unittest.TestCase):
             "file:103:02:42:/data/app/libtarget.so",
         )
         self.assertEqual(resolved["module_base"], "0x6ffffff000")
+        self.assertEqual(resolved["module_offset"], "0x1234")
+
+    def test_reads_legacy_modules_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "modules.json")
+            document = modules_document()
+            document["schema_version"] = "z9mon.modules.v1"
+            path.write_text(json.dumps(document), encoding="utf-8")
+
+            index = ModuleIndex.from_session(Path(directory))
+            resolved = index.resolve(123, 0x7000000234) if index else None
+
+        self.assertIsNotNone(resolved)
         self.assertEqual(resolved["module_offset"], "0x1234")
 
     def test_index_builds_from_raw_maps_dir_without_modules_json(self) -> None:

@@ -1,4 +1,4 @@
-# Z9Null Monitor CLI agent instructions
+# svcsite CLI agent instructions
 
 ## Scope
 
@@ -65,14 +65,14 @@ make kpm
 Run device checks without modifying monitor state:
 
 ```bash
-PYTHONPATH=src python3 -m z9mon doctor --device SERIAL --json
-PYTHONPATH=src python3 -m z9mon status --device SERIAL --json
+PYTHONPATH=src python3 -m svcsite doctor --device SERIAL --json
+PYTHONPATH=src python3 -m svcsite status --device SERIAL --json
 ```
 
 Run one bounded capture:
 
 ```bash
-PYTHONPATH=src python3 -m z9mon capture \
+PYTHONPATH=src python3 -m svcsite capture \
   --device SERIAL \
   --package TARGET \
   --duration 15 \
@@ -82,23 +82,23 @@ PYTHONPATH=src python3 -m z9mon capture \
 ```
 
 If the module is absent or outdated, report the stable error and use
-`--kpm /absolute/path/to/z9null_monitor.kpm` to converge. Explicit module
+`--kpm /absolute/path/to/svcsite.kpm` to converge. Explicit module
 loading has a minimum 60-second per-command wait because it installs kernel
 hooks; `stop`, `capture`, and module loading affect device state.
 
 Benchmark the current build against a controlled workload:
 
 ```bash
-PYTHONPATH=src python3 -m z9mon.commands.bench run \
+PYTHONPATH=src python3 -m svcsite.commands.bench run \
   --device SERIAL \
-  --kpm /absolute/path/to/z9null_monitor.kpm \
+  --kpm /absolute/path/to/svcsite.kpm \
   --json
 ```
 
 Compare two bench reports (offline, read-only):
 
 ```bash
-PYTHONPATH=src python3 -m z9mon.commands.bench compare \
+PYTHONPATH=src python3 -m svcsite.commands.bench compare \
   /absolute/path/to/bench/OLD_RUN/report.json \
   /absolute/path/to/bench/NEW_RUN/report.json \
   --json
@@ -107,7 +107,7 @@ PYTHONPATH=src python3 -m z9mon.commands.bench compare \
 Read a bounded result:
 
 ```bash
-PYTHONPATH=src python3 -m z9mon query \
+PYTHONPATH=src python3 -m svcsite query \
   /absolute/path/to/SESSION \
   --syscall openat,read \
   --contains /proc/ \
@@ -122,7 +122,7 @@ readable.
 
 ## Source boundaries
 
-- `src/z9mon/`: host-side Python implementation.
+- `src/svcsite/`: host-side Python implementation.
 - `kpm/`: locally modified KPM derived from the upstream documented in
   `UPSTREAM.md`.
 - `KernelPatch/`: pinned upstream Git submodule; do not edit it locally.

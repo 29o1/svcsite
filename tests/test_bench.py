@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from test_protocol import make_event
-from z9mon.bench import (
+from svcsite.bench import (
     aggregate as _aggregate,
     compare_reports,
     compute_quality_metrics,
@@ -16,8 +16,8 @@ from z9mon.bench import (
     percentile,
     render_compare_table,
 )
-from z9mon.commands.bench import main as bench_main
-from z9mon.constants import BENCH_SCHEMA, MODULES_SCHEMA
+from svcsite.commands.bench import main as bench_main
+from svcsite.constants import BENCH_SCHEMA, MODULES_SCHEMA
 
 
 class StatHelperTests(unittest.TestCase):

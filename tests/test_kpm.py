@@ -3,9 +3,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from z9mon.adb import CommandResult
-from z9mon.errors import Z9MonError
-from z9mon.kpm import KpmController, parse_json_payload
+from svcsite.adb import CommandResult
+from svcsite.errors import SvcSiteError
+from svcsite.kpm import KpmController, parse_json_payload
 
 
 class FakeAdb:
@@ -38,7 +38,7 @@ class ParseKpmPayloadTests(unittest.TestCase):
         self.assertEqual(len(payload["hooks"]), 2)
 
     def test_invalid_response_has_stable_error(self) -> None:
-        with self.assertRaises(Z9MonError) as context:
+        with self.assertRaises(SvcSiteError) as context:
             parse_json_payload("not-json")
 
         self.assertEqual(context.exception.code, "KPM_INVALID_RESPONSE")
@@ -64,12 +64,12 @@ class KpmControllerTests(unittest.TestCase):
             [
                 CommandResult(0, "/data/adb/ap/bin/kpatch\n", ""),
                 CommandResult(1, "", "invalid test-secret"),
-                CommandResult(0, "z9null_monitor\n", ""),
+                CommandResult(0, "svcsite\n", ""),
             ]
         )
         controller = KpmController(adb, "test-secret")
 
-        with self.assertRaises(Z9MonError) as context:
+        with self.assertRaises(SvcSiteError) as context:
             controller.status()
 
         self.assertEqual(context.exception.code, "KPM_COMMAND_FAILED")
@@ -85,7 +85,7 @@ class KpmControllerTests(unittest.TestCase):
         )
         controller = KpmController(adb, "test-secret")
 
-        with self.assertRaises(Z9MonError) as context:
+        with self.assertRaises(SvcSiteError) as context:
             controller.require_loaded()
 
         self.assertEqual(context.exception.code, "MODULE_NOT_LOADED")
@@ -104,7 +104,7 @@ class KpmControllerTests(unittest.TestCase):
 
 class EnsureModuleTests(unittest.TestCase):
     def _kpm_file(self, directory: str) -> tuple[Path, str]:
-        path = Path(directory, "z9null_monitor.kpm")
+        path = Path(directory, "svcsite.kpm")
         payload = b"fixture-module-bytes"
         path.write_bytes(payload)
         return path, hashlib.sha256(payload).hexdigest()
@@ -115,7 +115,7 @@ class EnsureModuleTests(unittest.TestCase):
             adb = FakeAdb(
                 [
                     CommandResult(0, "/data/local/tmp/kpatch\n", ""),
-                    CommandResult(0, "z9null_monitor\n", ""),
+                    CommandResult(0, "svcsite\n", ""),
                     CommandResult(0, digest + "\n", ""),
                 ]
             )
@@ -134,13 +134,13 @@ class EnsureModuleTests(unittest.TestCase):
             adb = FakeAdb(
                 [
                     CommandResult(0, "/data/local/tmp/kpatch\n", ""),
-                    CommandResult(0, "z9null_monitor\n", ""),
+                    CommandResult(0, "svcsite\n", ""),
                     CommandResult(0, "0" * 64 + "\n", ""),
-                    CommandResult(0, "z9null_monitor\n", ""),
+                    CommandResult(0, "svcsite\n", ""),
                     CommandResult(0, "", ""),
                     CommandResult(0, "", ""),
-                    CommandResult(0, "z9null_monitor\n", ""),
-                    CommandResult(0, "name=z9null_monitor\nversion=1.4.0\n", ""),
+                    CommandResult(0, "svcsite\n", ""),
+                    CommandResult(0, "name=svcsite\nversion=1.4.0\n", ""),
                     CommandResult(0, "", ""),
                 ]
             )
@@ -164,8 +164,8 @@ class EnsureModuleTests(unittest.TestCase):
                     CommandResult(0, "", ""),
                     CommandResult(0, "", ""),
                     CommandResult(0, "", ""),
-                    CommandResult(0, "z9null_monitor\n", ""),
-                    CommandResult(0, "name=z9null_monitor\nversion=1.4.0\n", ""),
+                    CommandResult(0, "svcsite\n", ""),
+                    CommandResult(0, "name=svcsite\nversion=1.4.0\n", ""),
                     CommandResult(0, "", ""),
                 ]
             )
@@ -176,11 +176,34 @@ class EnsureModuleTests(unittest.TestCase):
         self.assertEqual(outcome["action"], "loaded")
         self.assertFalse(any("unload" in c for c in adb.commands))
 
+    def test_migrates_legacy_module_before_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = self._kpm_file(directory)
+            adb = FakeAdb(
+                [
+                    CommandResult(0, "/data/local/tmp/kpatch\n", ""),
+                    CommandResult(0, "z9null_monitor\n", ""),
+                    CommandResult(0, "z9null_monitor\n", ""),
+                    CommandResult(0, "", ""),
+                    CommandResult(0, "", ""),
+                    CommandResult(0, "svcsite\n", ""),
+                    CommandResult(0, "name=svcsite\nversion=1.5.0\n", ""),
+                    CommandResult(0, "", ""),
+                ]
+            )
+            controller = KpmController(adb, "test-secret")
+
+            outcome = controller.ensure_module(path)
+
+        self.assertEqual(outcome["action"], "loaded")
+        self.assertTrue(any("unload z9null_monitor" in c for c in adb.commands))
+        self.assertTrue(any("kpm load" in c for c in adb.commands))
+
     def test_missing_kpm_file_has_stable_error(self) -> None:
         controller = KpmController(FakeAdb([]), "test-secret")
 
-        with self.assertRaises(Z9MonError) as context:
-            controller.ensure_module("/nonexistent/z9null_monitor.kpm")
+        with self.assertRaises(SvcSiteError) as context:
+            controller.ensure_module("/nonexistent/svcsite.kpm")
 
         self.assertEqual(context.exception.code, "KPM_FILE_NOT_FOUND")
 

@@ -2,8 +2,8 @@ import io
 import json
 import unittest
 
-from z9mon.errors import EXIT_DEVICE, Z9MonError
-from z9mon.output import error_payload, success_payload, write_payload
+from svcsite.errors import EXIT_DEVICE, SvcSiteError
+from svcsite.output import error_payload, success_payload, write_payload
 
 
 class OutputTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class OutputTests(unittest.TestCase):
         self.assertTrue(json.loads(rendered)["ok"])
 
     def test_error_payload_contains_stable_code(self) -> None:
-        error = Z9MonError(
+        error = SvcSiteError(
             "DEVICE_NOT_FOUND",
             "device missing",
             EXIT_DEVICE,

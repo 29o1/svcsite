@@ -1,4 +1,4 @@
-# Z9Null Monitor CLI
+# svcsite CLI
 
 面向 Codex、ZCode、Claude Code 等 AI Agent 的 Android syscall 动态分析 CLI。
 
@@ -8,14 +8,14 @@ Agent。
 
 ## 项目定位
 
-Z9Null Monitor 是独立的 syscall 观测工具，Agent 根据分析目标自行决定何时调用本工具。
+svcsite 是独立的 syscall 观测工具，Agent 根据分析目标自行决定何时调用本工具。
 
-![z9mon Agent 逆向分析链路](docs/z9mon-agent-chain.png)
+![svcsite Agent 逆向分析链路](docs/svcsite-agent-chain.png)
 
 ```text
 Codex / Claude Code / Human
               │
-           z9mon CLI
+           svcsite CLI
               │ ADB + root + kpatch ctl0
               ▼
     Android ARM64 KernelPatch KPM
@@ -27,7 +27,7 @@ Codex / Claude Code / Human
 ## 当前能力
 
 - `doctor`：检查 ADB、设备、ABI、root、kpatch 和 SuperKey 配置。
-- `status`：读取 `z9null_monitor` KPM 状态。
+- `status`：读取 `svcsite` KPM 状态。
 - `stop`：幂等地暂停 KPM 监控。
 - `capture`：按包名或精确 PID 完成一次有界采集并生成独立 session。
 - `query`：一次返回有界事件、调用点排行和证据质量。
@@ -50,13 +50,13 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-ZCode 通过 `~/.zcode/skills/z9mon/SKILL.md` 发现本工具。开发目录可直接链接：
+ZCode 通过 `~/.zcode/skills/svcsite/SKILL.md` 发现本工具。开发目录可直接链接：
 
 ```bash
-ln -s /absolute/path/to/z9null-monitor-cli ~/.zcode/skills/z9mon
+ln -s /absolute/path/to/svcsite ~/.zcode/skills/svcsite
 ```
 
-确保安装后的 `z9mon` 位于 ZCode 的 `PATH`；Agent 不应退回到直接调用
+确保安装后的 `svcsite` 位于 ZCode 的 `PATH`；Agent 不应退回到直接调用
 `kpatch kpm ctl0`。
 
 克隆仓库时需要初始化固定版本的 KernelPatch：
@@ -70,33 +70,33 @@ git submodule update --init --recursive
 默认从权限为 `0600` 的文件读取：
 
 ```bash
-mkdir -p ~/.config/z9mon
-install -m 600 /dev/null ~/.config/z9mon/superkey
-${EDITOR:-vi} ~/.config/z9mon/superkey
+mkdir -p ~/.config/svcsite
+install -m 600 /dev/null ~/.config/svcsite/superkey
+${EDITOR:-vi} ~/.config/svcsite/superkey
 ```
 
-也可以使用 `Z9MON_SUPERKEY_FILE` 指定其他文件，或以
-`Z9MON_SUPERKEY` 作为备用来源。CLI 不输出 SuperKey。
+也可以使用 `SVCSITE_SUPERKEY_FILE` 指定其他文件，或以
+`SVCSITE_SUPERKEY` 作为备用来源。CLI 不输出 SuperKey。
 
 ## 使用
 
 ```bash
-z9mon doctor --device SERIAL --json
-z9mon status --device SERIAL --json
-z9mon stop --device SERIAL --json
+svcsite doctor --device SERIAL --json
+svcsite status --device SERIAL --json
+svcsite stop --device SERIAL --json
 ```
 
 默认要求 KPM v1.5.0 已加载；模块缺失或过旧时使用显式 `--kpm PATH`。
 CLI 对比本地文件 sha256 与设备上的部署指纹，一致则跳过，不一致才替换。
 
 ```bash
-z9mon capture \
+svcsite capture \
   --device SERIAL \
   --package io.example.target \
   --duration 15 \
   --target-mode launch \
   --output ./captures \
-  --kpm ./kpm/z9null_monitor.kpm \
+  --kpm ./kpm/svcsite.kpm \
   --json
 ```
 
@@ -106,7 +106,7 @@ z9mon capture \
 模块已是当前构建时，后续采集可省略 `--kpm`：
 
 ```bash
-z9mon capture \
+svcsite capture \
   --device SERIAL \
   --package io.example.target \
   --duration 15 \
@@ -122,12 +122,12 @@ UID 采集，因此同 UID 的进程都会进入原始 session，随后可按 PI
 对于独立 oracle、`app_process` 或其他没有包名的进程，使用精确 PID：
 
 ```bash
-z9mon capture \
+svcsite capture \
   --device SERIAL \
   --pid 1687 \
   --duration 10 \
   --syscall openat,read,connect,sendto \
-  --kpm ./kpm/z9null_monitor.kpm \
+  --kpm ./kpm/svcsite.kpm \
   --json
 ```
 
@@ -142,7 +142,7 @@ z9mon capture \
 逗号分隔：
 
 ```bash
-z9mon capture \
+svcsite capture \
   --package io.example.target \
   --duration 10 \
   --syscall openat,read,ptrace \
@@ -173,13 +173,13 @@ PID，还会尝试生成 recovery 快照。地址解析直接读取这些快照�
 查询不会修改设备状态。一次查询固定返回匹配事件、调用点排行、数量和证据质量：
 
 ```bash
-z9mon query ./captures/SESSION_ID \
+svcsite query ./captures/SESSION_ID \
   --syscall openat,read \
   --contains /proc/ \
   --limit 50 \
   --json
 
-z9mon query ./captures/SESSION_ID \
+svcsite query ./captures/SESSION_ID \
   --module-id 'file:DEVICE:INODE:/absolute/device/path/libtarget.so' \
   --limit 20 \
   --json
@@ -233,7 +233,7 @@ Bench 不属于 Agent 主 CLI，只用于开发验收：
 
 ```bash
 make kpm && make bench
-PYTHONPATH=src python3 -m z9mon.commands.bench compare \
+PYTHONPATH=src python3 -m svcsite.commands.bench compare \
   bench/OLD_RUN/report.json \
   bench/NEW_RUN/report.json \
   --json
@@ -248,7 +248,7 @@ make check
 `make check` 对提交内的 Python 源码执行语法检查。设备端验收命令为：
 
 ```bash
-z9mon capture \
+svcsite capture \
   --package TARGET \
   --duration 15 \
   --target-mode launch \
