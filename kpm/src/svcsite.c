@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Derived from XiaoWaaay/SVCMonitors kpm/src/svc_monitor.c.
  * Migrated from the local z9null derivative checkpoint 6b5fca1.

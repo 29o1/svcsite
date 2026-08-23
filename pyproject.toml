@@ -1,13 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "svcsite"
 version = "0.9.0"
-description = "Agent-friendly Android syscall dynamic analysis CLI"
+description = "Android ARM64 syscall tracing and callsite analysis CLI for agents."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
 authors = [
   { name = "z9null" }
 ]
@@ -15,6 +17,9 @@ dependencies = []
 
 [project.scripts]
 svcsite = "svcsite.cli:main"
+
+[project.urls]
+Repository = "https://github.com/29o1/svcsite"
 
 [tool.setuptools.packages.find]
 where = ["src"]

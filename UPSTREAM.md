@@ -39,9 +39,10 @@ KernelPatch is included as a Git submodule from:
 
 KernelPatch remains a separate repository with its own history and license.
 
-## Publication note
+## License
 
 The source repository did not contain a root-level project license when this
-derivative was migrated. Preserve this provenance record and verify upstream
-permission and licensing before changing repository visibility or publishing
-redistributable KPM binaries.
+derivative was migrated. Its KPM source declares `KPM_LICENSE("GPL v2")`.
+This repository distributes the derivative and the host-side implementation
+under `GPL-2.0-only`; the root `LICENSE` contains the complete license text.
+Preserve this provenance record in redistributed copies.
