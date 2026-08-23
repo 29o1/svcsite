@@ -1,5 +1,7 @@
 # svcsite
 
+[English](README.md) | 简体中文
+
 Android ARM64 syscall tracing and callsite analysis CLI for agents.
 
 svcsite 通过 ADB、root shell 和 KernelPatch Module（KPM）采集目标进程的
