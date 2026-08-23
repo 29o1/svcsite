@@ -1,69 +1,40 @@
-# svcsite CLI
+# svcsite
 
-面向 Codex、ZCode、Claude Code 等 AI Agent 的 Android syscall 动态分析 CLI。
+Android ARM64 syscall tracing and callsite analysis CLI for agents.
 
-CLI 通过 ADB、root shell 和 KernelPatch Module（KPM）采集目标进程的
-syscall 运行时证据，并以稳定、可查询的 JSON 与二进制产物提供给
-Agent。
+svcsite 通过 ADB、root shell 和 KernelPatch Module（KPM）采集目标进程的
+syscall 运行时证据，并将地址解析到具体模块及偏移。它负责提供可复查的动态
+证据，不负责符号恢复或反编译。
 
-## 项目定位
+## 核心能力
 
-svcsite 是独立的 syscall 观测工具，Agent 根据分析目标自行决定何时调用本工具。
+- 按包名或精确 PID 进行有界 syscall 采集。
+- 记录 PC、LR 和最多 16 层 ARM64 FP-chain 回溯。
+- 结合进程 maps，将调用点解析为 `module_id` 和 `module_offset`。
+- 以稳定 JSON、错误码和绝对产物路径向 Agent 提供证据。
 
-![svcsite Agent 逆向分析链路](docs/svcsite-agent-chain.png)
+## 环境
 
-```text
-Codex / Claude Code / Human
-              │
-           svcsite CLI
-              │ ADB + root + kpatch ctl0
-              ▼
-    Android ARM64 KernelPatch KPM
-              │
-              ▼
-       binary event artifacts
-```
+- Python 3.11+
+- ADB
+- Android ARM64 设备
+- root、KernelPatch、`kpatch` 和 SuperKey
+- 构建 KPM 时需要 Android NDK r29+
 
-## 当前能力
-
-- `doctor`：检查 ADB、设备、ABI、root、kpatch 和 SuperKey 配置。
-- `status`：读取 `svcsite` KPM 状态。
-- `stop`：幂等地暂停 KPM 监控。
-- `capture`：按包名或精确 PID 完成一次有界采集并生成独立 session。
-- `query`：一次返回有界事件、调用点排行和证据质量。
-- 包名模式采集目标 UID 下所有进程的 `/proc/<pid>/maps`；PID 模式只采集
-  指定进程，并自动补充事件地址信息。
-- KPM 记录独立的 PC、LR 和最多 16 层 FP-chain；查询额外给出 ARM64
-  返回地址对应的调用指令位置（`return_address - 4`）。
-- 二进制 v1/v2 事件解析、损坏重同步、截断检测和序列缺口统计。
-- 使用流式事件扫描和 maps 区间索引处理大型 session，避免把全部事件对象
-  常驻内存。
-- 本地二开 KPM 源码及可复现构建入口。
+当前验证基线为 macOS 主机、Pixel 6、Android 14 和 arm64-v8a。
 
 ## 安装
 
-要求 Python 3.11 或更高版本：
-
 ```bash
+git clone --recurse-submodules https://github.com/29o1/svcsite.git
+cd svcsite
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 ```
 
-ZCode 通过 `~/.zcode/skills/svcsite/SKILL.md` 发现本工具。开发目录可直接链接：
-
-```bash
-ln -s /absolute/path/to/svcsite ~/.zcode/skills/svcsite
-```
-
-确保安装后的 `svcsite` 位于 ZCode 的 `PATH`；Agent 不应退回到直接调用
-`kpatch kpm ctl0`。
-
-克隆仓库时需要初始化固定版本的 KernelPatch：
-
-```bash
-git submodule update --init --recursive
-```
+Agent 可使用仓库根目录的 `SKILL.md` 了解调用约定；运行时应确保 `svcsite`
+位于 `PATH`。
 
 ## SuperKey
 
@@ -75,189 +46,94 @@ install -m 600 /dev/null ~/.config/svcsite/superkey
 ${EDITOR:-vi} ~/.config/svcsite/superkey
 ```
 
-也可以使用 `SVCSITE_SUPERKEY_FILE` 指定其他文件，或以
-`SVCSITE_SUPERKEY` 作为备用来源。CLI 不输出 SuperKey。
+也可以使用 `SVCSITE_SUPERKEY_FILE` 指定文件，或使用
+`SVCSITE_SUPERKEY` 环境变量。CLI 不输出 SuperKey。
 
 ## 使用
+
+Agent 调用一律使用 `--json`。JSON 模式下 stdout 只包含一个 JSON 对象，
+诊断信息写入 stderr。
+
+### 1. 检查环境
 
 ```bash
 svcsite doctor --device SERIAL --json
 svcsite status --device SERIAL --json
-svcsite stop --device SERIAL --json
 ```
 
-默认要求 KPM v1.5.0 已加载；模块缺失或过旧时使用显式 `--kpm PATH`。
-CLI 对比本地文件 sha256 与设备上的部署指纹，一致则跳过，不一致才替换。
+### 2. 采集
 
 ```bash
-svcsite capture \
-  --device SERIAL \
-  --package io.example.target \
-  --duration 15 \
-  --target-mode launch \
-  --output ./captures \
-  --kpm ./kpm/svcsite.kpm \
-  --json
+svcsite capture --device SERIAL --package io.example.target --duration 15 \
+  --target-mode launch --output ./captures --kpm ./kpm/svcsite.kpm --json
 ```
 
-首次模块加载会安装内核 hook；CLI 为该步骤保留至少 60 秒的单命令等待时间，
-其余设备命令仍使用 `--timeout`（默认 15 秒）。
+`--package` 和 `--pid` 二选一。包名目标支持 `attach`、`launch` 和
+`restart`；PID 目标为精确 TGID 过滤，只支持 `attach`。
 
-模块已是当前构建时，后续采集可省略 `--kpm`：
+首次加载或模块版本不匹配时显式传入 `--kpm`。CLI 根据本地文件 sha256
+收敛设备模块；匹配时跳过替换。模块已经匹配后可省略该参数。
+
+默认采集面向逆向分析的基础 syscall 集合。使用 `--syscall` 可进一步限定：
 
 ```bash
-svcsite capture \
-  --device SERIAL \
-  --package io.example.target \
-  --duration 15 \
-  --target-mode restart \
-  --output ./captures \
-  --json
+svcsite capture --device SERIAL --pid 1687 --duration 10 \
+  --syscall openat,read,connect,sendto --json
 ```
 
-`--target-mode attach`（默认）不修改 App 生命周期；`launch` 启动目标但不先
-清理状态；`restart` 会先 `force-stop` 再启动，不会清除 App 数据。KPM 按目标
-UID 采集，因此同 UID 的进程都会进入原始 session，随后可按 PID/TID 查询。
-
-对于独立 oracle、`app_process` 或其他没有包名的进程，使用精确 PID：
-
-```bash
-svcsite capture \
-  --device SERIAL \
-  --pid 1687 \
-  --duration 10 \
-  --syscall openat,read,connect,sendto \
-  --kpm ./kpm/svcsite.kpm \
-  --json
-```
-
-`--package` 和 `--pid` 互斥；PID 目标只支持默认的 `attach` 模式。旧模块返回
-`MODULE_VERSION_UNSUPPORTED`，用 `--kpm` 显式收敛后重试。
-
-生命周期参数统一为 `--target-mode`，默认 syscall 集合不需要显式 preset。
-旧参数 `--launch`、`--restart`、`--stats`、`--callsite-stats` 和 `--preset`
-已移除，避免 Agent 组合出互相冲突的状态。
-
-不提供 `--syscall` 时使用 `reverse-basic` 集合。自定义 syscall 可重复或使用
-逗号分隔：
-
-```bash
-svcsite capture \
-  --package io.example.target \
-  --duration 10 \
-  --syscall openat,read,ptrace \
-  --json
-```
-
-自定义项限定为 KPM 中已声明正确参数个数的 Tier1/Tier2 syscall；例如
-`openat`、`write`、`sendmsg`、`execveat`。不对任意 syscall 动态猜测参数
-个数，未支持项返回 `SYSCALL_UNSUPPORTED`。
-
-每次采集生成：
+每次采集生成独立 session：
 
 ```text
 captures/SESSION_ID/
 ├── manifest.json
 ├── events.bin
 └── maps/
-    ├── post-launch-PID.maps
-    ├── pre-stop-PID.maps
-    └── recovery-PID.maps
+    └── SNAPSHOT-PID.maps
 ```
 
-`maps/` 保留启动后和停止前的进程映射原始快照；若事件中出现尚未覆盖的
-PID，还会尝试生成 recovery 快照。地址解析直接读取这些快照；旧版本 session
-携带的 `modules.json` 仍然可用。maps 获取失败只记录 warning，不会让一次
-已完成的 syscall 采集失败。新采集使用 session schema v2；旧 session 仍可查询。
+`manifest.json` 包含采集参数、摘要和 warning；`events.bin` 保存 syscall
+证据；`maps/` 用于地址解析。maps 获取失败只产生 warning，不会使已经完成的
+syscall 采集失效。
 
-查询不会修改设备状态。一次查询固定返回匹配事件、调用点排行、数量和证据质量：
+### 3. 查询
 
 ```bash
-svcsite query ./captures/SESSION_ID \
-  --syscall openat,read \
-  --contains /proc/ \
-  --limit 50 \
-  --json
-
-svcsite query ./captures/SESSION_ID \
-  --module-id 'file:DEVICE:INODE:/absolute/device/path/libtarget.so' \
-  --limit 20 \
-  --json
+svcsite query ./captures/SESSION_ID --syscall openat,read \
+  --contains /proc/ --limit 20 --json
 ```
 
-`--limit` 默认 20，同时限制 `events` 和 `callsites` 两个列表。当 session
-含有映射数据时，`query` 会保留原始
-`pc`、`caller`、`clone_fn` 和 backtrace 地址，并增加调用点对应的 resolved
-字段。解析结果只做运行时地址归一化（`module`、`module_id`、`path`、
-`module_offset`）。
-`module` 是适合展示的 basename；`module_id` 组合完整规范化路径、设备号和
-inode，用于区分不同 App 中同名的 `base.apk` 或 `.so`。缺少该字段时会在查询
-阶段自动推导。本工具不拉取 ELF，也不提供符号名或源码行信息；没有映射数据
-的 session 仍可查询。
+query 是纯离线读操作，返回：
 
-`events` 用于查看具体 syscall 参数和调用链；`callsites` 按 syscall、模块和
-模块内偏移聚合并按频次排序，适合交给静态分析工具继续处理。`--module-id`
-会同时筛选事件和调用点，模块标识可从首次查询的 resolved 字段取得。
+- `events`：具体 syscall、进程、线程、参数和回溯。
+- `callsites`：按频次排列的 syscall × module × module_offset。
+- `counts`：匹配数、返回数和截断数。
+- `quality`：内核丢弃、序列缺口和解析器状态。
 
-`caller` 和 FP-chain 中的地址是 ARM64 返回地址。查询保留这些原始证据，
-并额外输出 `caller_callsite`、`backtrace_callsites` 及对应的 resolved 字段，
-方便直接把调用指令的模块内偏移交给静态分析工具。旧 KPM 的 backtrace 会
-重复包含 PC；该位置的 callsite 返回 `null`，避免错误执行 `PC - 4`。
+`--limit` 同时限制 events 和 callsites。可使用 `--pid`、`--tid`、
+`--contains` 或 `--module-id` 缩小结果。
 
-`--json` 模式下 stdout 只包含一个紧凑 JSON 对象。诊断信息写入 stderr，
-并使用稳定的错误代码和进程退出码。capture warning 位于结果信封顶层并使用
-结构化 `code`、`phase`、PID 等字段；重复的短生命周期 PID maps warning 会
-聚合，完整明细仍保存在 `manifest.json`。采集摘要也直接保存在 manifest 的
-`summary` 字段中。
+`module` 只是展示名；跨映射比较时应使用 `module_id` 或完整 `path`。
+原始 caller 和 backtrace 值是 ARM64 返回地址，派生 callsite 已减 4，可直接
+将其 `module_offset` 交给 IDA 等静态分析工具。
 
-## 构建 KPM
-
-先设置 Android SDK/NDK，再执行：
-
-```bash
-make kpm
-```
-
-默认使用仓库中的 `KernelPatch` submodule，也可显式覆盖：
-
-```bash
-make kpm KP_DIR=/absolute/path/to/KernelPatch
-```
-
-当前 CLI 统一要求 KPM v1.5.0。模块只在显式传入 `--kpm` 且本地 sha256 与
-设备部署指纹不一致时替换。
-
-## 开发基准
-
-Bench 不属于 Agent 主 CLI，只用于开发验收：
-
-```bash
-make kpm && make bench
-PYTHONPATH=src python3 -m svcsite.commands.bench compare \
-  bench/OLD_RUN/report.json \
-  bench/NEW_RUN/report.json \
-  --json
-```
-
-## 验证
+## 构建与验证
 
 ```bash
 make check
+make kpm
 ```
 
-`make check` 对提交内的 Python 源码执行语法检查。设备端验收命令为：
+`make check` 运行 Python 语法检查和单元测试。`make kpm` 使用固定的
+KernelPatch submodule 构建 `kpm/svcsite.kpm`。
 
-```bash
-svcsite capture \
-  --package TARGET \
-  --duration 15 \
-  --target-mode launch \
-  --output ./captures \
-  --json
-```
+## 使用边界
 
-## 来源
+本项目仅用于获得授权的安全研究与逆向分析。加载 KPM 会修改设备内核运行状态，
+可能导致目标设备崩溃或重启；请在测试设备上使用并提前备份重要数据。
 
-KPM 基于 `XiaoWaaay/SVCMonitors` 的本地二次开发版本迁移而来，Python CLI
-为本仓库新增实现。详细来源、基准提交和修改边界见
-[UPSTREAM.md](UPSTREAM.md)。
+## 来源与许可证
+
+KPM 基于 `XiaoWaaay/SVCMonitors` 的本地二次开发版本迁移而来。上游固定
+提交、作者和修改边界见 [UPSTREAM.md](UPSTREAM.md)。
+
+svcsite 采用 [GNU General Public License v2.0 only](LICENSE)。
