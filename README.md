@@ -1,29 +1,33 @@
 # svcsite
 
+English | [简体中文](README.zh-CN.md)
+
 Android ARM64 syscall tracing and callsite analysis CLI for agents.
 
-svcsite 通过 ADB、root shell 和 KernelPatch Module（KPM）采集目标进程的
-syscall 运行时证据，并将地址解析到具体模块及偏移。它负责提供可复查的动态
-证据，不负责符号恢复或反编译。
+svcsite captures runtime syscall evidence from target processes through ADB, a
+root shell, and a KernelPatch Module (KPM), then resolves runtime addresses to
+mapped modules and offsets. It provides reviewable dynamic evidence; symbol
+recovery and decompilation remain the responsibility of static analysis tools.
 
-## 核心能力
+## Capabilities
 
-- 按包名或精确 PID 进行有界 syscall 采集。
-- 记录 PC、LR 和最多 16 层 ARM64 FP-chain 回溯。
-- 结合进程 maps，将调用点解析为 `module_id` 和 `module_offset`。
-- 以稳定 JSON、错误码和绝对产物路径向 Agent 提供证据。
+- Run bounded syscall captures by package name or exact PID.
+- Record PC, LR, and up to 16 ARM64 frame-pointer-chain return addresses.
+- Resolve callsites to `module_id` and `module_offset` using process maps.
+- Return stable JSON, error codes, and absolute artifact paths to agents.
 
-## 环境
+## Requirements
 
 - Python 3.11+
 - ADB
-- Android ARM64 设备
-- root、KernelPatch、`kpatch` 和 SuperKey
-- 构建 KPM 时需要 Android NDK r29+
+- An Android ARM64 device
+- root, KernelPatch, `kpatch`, and a SuperKey
+- Android NDK r29+ to build the KPM
 
-当前验证基线为 macOS 主机、Pixel 6、Android 14 和 arm64-v8a。
+The current validation baseline is a macOS host with a Pixel 6 running Android
+14 on arm64-v8a.
 
-## 安装
+## Installation
 
 ```bash
 git clone --recurse-submodules https://github.com/29o1/svcsite.git
@@ -33,12 +37,12 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-Agent 可使用仓库根目录的 `SKILL.md` 了解调用约定；运行时应确保 `svcsite`
-位于 `PATH`。
+Agents can read the repository-level `SKILL.md` for invocation guidance. Make
+sure `svcsite` is available on `PATH` at runtime.
 
 ## SuperKey
 
-默认从权限为 `0600` 的文件读取：
+By default, svcsite reads the SuperKey from a file with `0600` permissions:
 
 ```bash
 mkdir -p ~/.config/svcsite
@@ -46,42 +50,47 @@ install -m 600 /dev/null ~/.config/svcsite/superkey
 ${EDITOR:-vi} ~/.config/svcsite/superkey
 ```
 
-也可以使用 `SVCSITE_SUPERKEY_FILE` 指定文件，或使用
-`SVCSITE_SUPERKEY` 环境变量。CLI 不输出 SuperKey。
+Alternatively, set `SVCSITE_SUPERKEY_FILE` to another file or provide
+`SVCSITE_SUPERKEY` as an environment variable. The CLI never prints the
+SuperKey.
 
-## 使用
+## Usage
 
-Agent 调用一律使用 `--json`。JSON 模式下 stdout 只包含一个 JSON 对象，
-诊断信息写入 stderr。
+Agents should always pass `--json`. In JSON mode, stdout contains exactly one
+JSON object and diagnostics are written to stderr.
 
-### 1. 检查环境
+### 1. Check the environment
 
 ```bash
 svcsite doctor --device SERIAL --json
 svcsite status --device SERIAL --json
 ```
 
-### 2. 采集
+### 2. Capture
 
 ```bash
 svcsite capture --device SERIAL --package io.example.target --duration 15 \
   --target-mode launch --output ./captures --kpm ./kpm/svcsite.kpm --json
 ```
 
-`--package` 和 `--pid` 二选一。包名目标支持 `attach`、`launch` 和
-`restart`；PID 目标为精确 TGID 过滤，只支持 `attach`。
+Pass exactly one of `--package` and `--pid`. Package targets support `attach`,
+`launch`, and `restart`. PID targets use exact TGID filtering and support only
+`attach`.
 
-首次加载或模块版本不匹配时显式传入 `--kpm`。CLI 根据本地文件 sha256
-收敛设备模块；匹配时跳过替换。模块已经匹配后可省略该参数。
+Pass `--kpm` explicitly when loading the module for the first time or when the
+device module is outdated. The CLI converges the deployed module against the
+local file's SHA-256 and skips replacement when they already match. Once the
+module matches, `--kpm` may be omitted.
 
-默认采集面向逆向分析的基础 syscall 集合。使用 `--syscall` 可进一步限定：
+The default capture uses a baseline syscall set intended for reverse
+engineering. Use `--syscall` to narrow it further:
 
 ```bash
 svcsite capture --device SERIAL --pid 1687 --duration 10 \
   --syscall openat,read,connect,sendto --json
 ```
 
-每次采集生成独立 session：
+Each capture creates an independent session:
 
 ```text
 captures/SESSION_ID/
@@ -91,49 +100,53 @@ captures/SESSION_ID/
     └── SNAPSHOT-PID.maps
 ```
 
-`manifest.json` 包含采集参数、摘要和 warning；`events.bin` 保存 syscall
-证据；`maps/` 用于地址解析。maps 获取失败只产生 warning，不会使已经完成的
-syscall 采集失效。
+`manifest.json` contains the capture parameters, summary, and warnings.
+`events.bin` stores syscall evidence, and `maps/` supports address resolution.
+A maps failure produces a warning but does not invalidate syscall evidence that
+was already captured.
 
-### 3. 查询
+### 3. Query
 
 ```bash
 svcsite query ./captures/SESSION_ID --syscall openat,read \
   --contains /proc/ --limit 20 --json
 ```
 
-query 是纯离线读操作，返回：
+`query` is a read-only offline operation that returns:
 
-- `events`：具体 syscall、进程、线程、参数和回溯。
-- `callsites`：按频次排列的 syscall × module × module_offset。
-- `counts`：匹配数、返回数和截断数。
-- `quality`：内核丢弃、序列缺口和解析器状态。
+- `events`: syscall, process, thread, argument, and backtrace evidence.
+- `callsites`: syscall × module × module offset, ranked by frequency.
+- `counts`: match, return, and truncation counts.
+- `quality`: kernel drops, sequence gaps, and parser status.
 
-`--limit` 同时限制 events 和 callsites。可使用 `--pid`、`--tid`、
-`--contains` 或 `--module-id` 缩小结果。
+`--limit` bounds both events and callsites. Use `--pid`, `--tid`, `--contains`,
+or `--module-id` to narrow the result.
 
-`module` 只是展示名；跨映射比较时应使用 `module_id` 或完整 `path`。
-原始 caller 和 backtrace 值是 ARM64 返回地址，派生 callsite 已减 4，可直接
-将其 `module_offset` 交给 IDA 等静态分析工具。
+`module` is only a display name. Use `module_id` or the full `path` when
+comparing mappings. Raw caller and backtrace values are ARM64 return addresses;
+derived callsites subtract four bytes, so their `module_offset` can be passed
+directly to IDA or another static analysis tool.
 
-## 构建与验证
+## Build and verification
 
 ```bash
 make check
 make kpm
 ```
 
-`make check` 运行 Python 语法检查和单元测试。`make kpm` 使用固定的
-KernelPatch submodule 构建 `kpm/svcsite.kpm`。
+`make check` runs Python syntax checks and unit tests. `make kpm` builds
+`kpm/svcsite.kpm` from the pinned KernelPatch submodule.
 
-## 使用边界
+## Safety and scope
 
-本项目仅用于获得授权的安全研究与逆向分析。加载 KPM 会修改设备内核运行状态，
-可能导致目标设备崩溃或重启；请在测试设备上使用并提前备份重要数据。
+Use this project only for authorized security research and reverse engineering.
+Loading a KPM changes live kernel state and may crash or reboot the device. Use
+a test device and back up important data first.
 
-## 来源与许可证
+## Origin and license
 
-KPM 基于 `XiaoWaaay/SVCMonitors` 的本地二次开发版本迁移而来。上游固定
-提交、作者和修改边界见 [UPSTREAM.md](UPSTREAM.md)。
+The KPM was migrated from a locally modified version of
+`XiaoWaaay/SVCMonitors`. See [UPSTREAM.md](UPSTREAM.md) for the pinned upstream
+commit, attribution, and modification boundary.
 
-svcsite 采用 [GNU General Public License v2.0 only](LICENSE)。
+svcsite is licensed under the [GNU General Public License v2.0 only](LICENSE).
