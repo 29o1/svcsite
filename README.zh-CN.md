@@ -2,28 +2,27 @@
 
 [English](README.md) | 简体中文
 
-Android ARM64 syscall tracing and callsite analysis CLI for agents.
+面向 Agent 的 Android ARM64 syscall 追踪与调用点分析 CLI。
 
-svcsite 通过 ADB、root shell 和 KernelPatch Module（KPM）采集目标进程的
-syscall 运行时证据，并将地址解析到具体模块及偏移。它负责提供可复查的动态
-证据，不负责符号恢复或反编译。
+svcsite 通过 ADB 和 KernelPatch Module（KPM）采集 Android 进程的有界
+syscall 证据，并将运行时地址解析为模块与偏移，供 IDA、Ghidra 等静态分析
+工具使用。
 
 ## 核心能力
 
-- 按包名或精确 PID 进行有界 syscall 采集。
-- 记录 PC、LR 和最多 16 层 ARM64 FP-chain 回溯。
-- 结合进程 maps，将调用点解析为 `module_id` 和 `module_offset`。
-- 以稳定 JSON、错误码和绝对产物路径向 Agent 提供证据。
+- 按包名或精确 PID 限定目标。
+- 记录 syscall 参数、PC、LR 和最多 16 层 ARM64 返回地址。
+- 返回有界事件、调用点排行、计数和证据质量。
+- 提供确定性 JSON、稳定错误码和绝对产物路径。
 
-## 环境
+## 环境要求
 
-- Python 3.11+
-- ADB
-- Android ARM64 设备
-- root、KernelPatch、`kpatch` 和 SuperKey
-- 构建 KPM 时需要 Android NDK r29+
+- macOS、Python 3.11+ 和 ADB
+- 具备 root、KernelPatch 和 `kpatch` 的 Android ARM64 设备
+- KernelPatch SuperKey
+- 构建 KPM 时使用 Android NDK r29+
 
-当前验证基线为 macOS 主机、Pixel 6、Android 14 和 arm64-v8a。
+当前验证基线为 Pixel 6、Android 14 和 arm64-v8a。
 
 ## 安装
 
@@ -35,12 +34,11 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-Agent 可使用仓库根目录的 `SKILL.md` 了解调用约定；运行时应确保 `svcsite`
-位于 `PATH`。
+Agent 调用说明见 [`SKILL.md`](SKILL.md)。使用前确保 `svcsite` 位于 `PATH`。
 
 ## SuperKey
 
-默认从权限为 `0600` 的文件读取：
+将 SuperKey 保存到权限为 `0600` 的文件：
 
 ```bash
 mkdir -p ~/.config/svcsite
@@ -48,94 +46,80 @@ install -m 600 /dev/null ~/.config/svcsite/superkey
 ${EDITOR:-vi} ~/.config/svcsite/superkey
 ```
 
-也可以使用 `SVCSITE_SUPERKEY_FILE` 指定文件，或使用
-`SVCSITE_SUPERKEY` 环境变量。CLI 不输出 SuperKey。
+CLI 也支持 `SVCSITE_SUPERKEY_FILE` 和 `SVCSITE_SUPERKEY`，不会将密钥写入
+命令输出、日志或采集产物。
 
-## 使用
+## Agent 工作流
 
-Agent 调用一律使用 `--json`。JSON 模式下 stdout 只包含一个 JSON 对象，
-诊断信息写入 stderr。
+Agent 调用统一传入 `--json`。stdout 只输出一个 JSON 对象，诊断信息写入
+stderr；失败时返回稳定错误码和非零退出码。
 
-### 1. 检查环境
+检查环境和模块状态：
 
 ```bash
 svcsite doctor --device SERIAL --json
 svcsite status --device SERIAL --json
 ```
 
-### 2. 采集
+执行一次有界采集：
 
 ```bash
-svcsite capture --device SERIAL --package io.example.target --duration 15 \
-  --target-mode launch --output ./captures --kpm ./kpm/svcsite.kpm --json
+svcsite capture \
+  --device SERIAL \
+  --package io.example.target \
+  --target-mode launch \
+  --duration 15 \
+  --output ./captures \
+  --kpm ./kpm/svcsite.kpm \
+  --json
 ```
 
-`--package` 和 `--pid` 二选一。包名目标支持 `attach`、`launch` 和
-`restart`；PID 目标为精确 TGID 过滤，只支持 `attach`。
+`--package` 和 `--pid` 必须指定一个。包名目标支持 `attach`、`launch` 和
+`restart`；PID 目标使用精确 TGID 过滤和 `attach` 模式。
 
-首次加载或模块版本不匹配时显式传入 `--kpm`。CLI 根据本地文件 sha256
-收敛设备模块；匹配时跳过替换。模块已经匹配后可省略该参数。
+首次加载或更新时传入 `--kpm`。svcsite 比较 SHA-256，设备模块一致时跳过
+安装。
 
-默认采集面向逆向分析的基础 syscall 集合。使用 `--syscall` 可进一步限定：
+离线查询已保存的 session：
 
 ```bash
-svcsite capture --device SERIAL --pid 1687 --duration 10 \
-  --syscall openat,read,connect,sendto --json
+svcsite query /absolute/path/to/captures/SESSION_ID \
+  --syscall openat,read \
+  --contains /proc/ \
+  --limit 20 \
+  --json
 ```
 
-每次采集生成独立 session：
+`query` 一次返回 `events`、调用点排行 `callsites`、`counts` 和 `quality`。
+`--limit` 同时限制两个列表。可使用 `--pid`、`--tid`、`--contains` 或
+`--module-id` 聚焦证据。
 
-```text
-captures/SESSION_ID/
-├── manifest.json
-├── events.bin
-└── maps/
-    └── SNAPSHOT-PID.maps
-```
-
-`manifest.json` 包含采集参数、摘要和 warning；`events.bin` 保存 syscall
-证据；`maps/` 用于地址解析。maps 获取失败只产生 warning，不会使已经完成的
-syscall 采集失效。
-
-### 3. 查询
+正常完成的 capture 会关闭监控并排空事件缓冲区。中断后可安全重试清理命令：
 
 ```bash
-svcsite query ./captures/SESSION_ID --syscall openat,read \
-  --contains /proc/ --limit 20 --json
+svcsite stop --device SERIAL --json
 ```
 
-query 是纯离线读操作，返回：
+## Session 与地址
 
-- `events`：具体 syscall、进程、线程、参数和回溯。
-- `callsites`：按频次排列的 syscall × module × module_offset。
-- `counts`：匹配数、返回数和截断数。
-- `quality`：内核丢弃、序列缺口和解析器状态。
+每个 session 包含 `manifest.json`、`events.bin` 和 `maps/` 下的进程映射
+快照。映射获取失败会记录 warning，已采集的 syscall 记录仍可查询。
 
-`--limit` 同时限制 events 和 callsites。可使用 `--pid`、`--tid`、
-`--contains` 或 `--module-id` 缩小结果。
+原始 LR 和 backtrace 值是 ARM64 返回地址。派生 callsite 会减去 4 字节，
+并以模块偏移表示调用指令。标识具体二进制时使用 `module_id` 或完整映射路径；
+`module` 用于展示。
 
-`module` 只是展示名；跨映射比较时应使用 `module_id` 或完整 `path`。
-原始 caller 和 backtrace 值是 ARM64 返回地址，派生 callsite 已减 4，可直接
-将其 `module_offset` 交给 IDA 等静态分析工具。
-
-## 构建与验证
+## 开发
 
 ```bash
 make check
 make kpm
 ```
 
-`make check` 运行 Python 语法检查和单元测试。`make kpm` 使用固定的
-KernelPatch submodule 构建 `kpm/svcsite.kpm`。
+## 安全与许可证
 
-## 使用边界
+svcsite 仅用于经过授权的安全研究和逆向分析。加载 KPM 会改变设备内核运行状态，
+并可能导致设备崩溃或重启。
 
-本项目仅用于获得授权的安全研究与逆向分析。加载 KPM 会修改设备内核运行状态，
-可能导致目标设备崩溃或重启；请在测试设备上使用并提前备份重要数据。
-
-## 来源与许可证
-
-KPM 基于 `XiaoWaaay/SVCMonitors` 的本地二次开发版本迁移而来。上游固定
-提交、作者和修改边界见 [UPSTREAM.md](UPSTREAM.md)。
-
-svcsite 采用 [GNU General Public License v2.0 only](LICENSE)。
+KPM 来源和修改边界见 [`UPSTREAM.md`](UPSTREAM.md)。svcsite 采用
+[GNU General Public License v2.0 only](LICENSE)。
