@@ -287,7 +287,8 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     manifest_path = session_dir / "manifest.json"
     maps_dir = session_dir / "maps"
     warnings: list[dict[str, Any]] = []
-    maps_snapshots: list[dict[str, Any]] = []
+    mapped_pid_set: set[int] = set()
+    maps_snapshot_count = 0
     launch_result: dict[str, str] | None = None
     started_at = utc_now()
     monotonic_start = time.monotonic()
@@ -328,7 +329,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 }
             )
 
-        maps_snapshots.append(
+        mapped_pid_set.update(
             capture_maps_snapshot(
                 adb,
                 uid=uid,
@@ -341,6 +342,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 else 0.0,
             )
         )
+        maps_snapshot_count += 1
 
         try:
             time.sleep(options.duration)
@@ -352,7 +354,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                     "evidence_valid": True,
                 }
             )
-        maps_snapshots.append(
+        mapped_pid_set.update(
             capture_maps_snapshot(
                 adb,
                 uid=uid,
@@ -362,6 +364,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 only_pids={int(target["pid"])} if target_kind == "pid" else None,
             )
         )
+        maps_snapshot_count += 1
     finally:
         if monitoring_started:
             controller.stop()
@@ -377,15 +380,9 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
 
     ended_at = utc_now()
     target_pids = sorted(observed_pids)
-    mapped_pids = {
-        process["pid"]
-        for snapshot in maps_snapshots
-        for process in snapshot.get("processes", [])
-        if isinstance(process, dict) and isinstance(process.get("pid"), int)
-    }
-    missing_pids = set(target_pids) - mapped_pids
+    missing_pids = set(target_pids) - mapped_pid_set
     if missing_pids:
-        maps_snapshots.append(
+        mapped_pid_set.update(
             capture_maps_snapshot(
                 adb,
                 uid=uid,
@@ -395,14 +392,8 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                 only_pids=missing_pids,
             )
         )
-    mapped_pids = sorted(
-        {
-            process["pid"]
-            for snapshot in maps_snapshots
-            for process in snapshot.get("processes", [])
-            if isinstance(process, dict) and isinstance(process.get("pid"), int)
-        }
-    )
+        maps_snapshot_count += 1
+    mapped_pids = sorted(mapped_pid_set)
     maps_directory = str(maps_dir.resolve()) if maps_dir.is_dir() else None
     selected_syscalls = [
         {"nr": number, "name": syscall_names.get(number, f"sys_{number}")}
@@ -447,7 +438,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             },
             "maps": {
                 "directory": maps_directory,
-                "snapshot_count": len(maps_snapshots),
+                "snapshot_count": maps_snapshot_count,
                 "mapped_pids": mapped_pids,
             },
         },

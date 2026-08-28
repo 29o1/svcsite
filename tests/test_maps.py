@@ -3,8 +3,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from svcsite.adb import ProcessInfo
 from svcsite.constants import MODULES_SCHEMA
-from svcsite.maps import ModuleIndex, parse_proc_maps
+from svcsite.maps import ModuleIndex, capture_maps_snapshot, parse_proc_maps
 
 
 MAPS_TEXT = """7000000000-7000010000 r-xp 00001000 103:02 42 /data/app/libtarget.so
@@ -38,6 +39,32 @@ def modules_document() -> dict:
 
 
 class ProcMapsTests(unittest.TestCase):
+    def test_capture_snapshot_returns_written_pids_and_raw_maps(self) -> None:
+        class FakeAdb:
+            def processes_for_uid(self, uid: int) -> list[ProcessInfo]:
+                return [ProcessInfo(pid=123, uid=uid, name="io.target")]
+
+            def read_process_maps(self, pid: int) -> str:
+                return MAPS_TEXT
+
+        with tempfile.TemporaryDirectory() as directory:
+            maps_dir = Path(directory, "maps")
+            warnings: list[dict] = []
+
+            captured = capture_maps_snapshot(
+                FakeAdb(),
+                uid=10300,
+                maps_dir=maps_dir,
+                snapshot_id="post-launch",
+                warnings=warnings,
+            )
+
+            raw = (maps_dir / "post-launch-123.maps").read_text(encoding="utf-8")
+
+        self.assertEqual(captured, {123})
+        self.assertEqual(raw, MAPS_TEXT)
+        self.assertEqual(warnings, [])
+
     def test_parses_module_and_anonymous_mapping(self) -> None:
         parsed = parse_proc_maps(MAPS_TEXT)
 

@@ -12,7 +12,6 @@ from svcsite.adb import AdbClient, ProcessInfo
 from svcsite.constants import LEGACY_MODULES_SCHEMA, MODULES_SCHEMA
 from svcsite.hexutil import hex_str
 from svcsite.errors import EXIT_DATA, SvcSiteError
-from svcsite.session import utc_now
 
 
 def _module_name(path: str) -> str | None:
@@ -112,7 +111,7 @@ def capture_maps_snapshot(
     warnings: list[dict[str, Any]],
     only_pids: Iterable[int] | None = None,
     wait_seconds: float = 0.0,
-) -> dict[str, Any]:
+) -> set[int]:
     import time
 
     wanted = set(only_pids) if only_pids is not None else None
@@ -148,13 +147,8 @@ def capture_maps_snapshot(
                 "evidence_valid": True,
             }
         )
-        return {
-            "snapshot_id": snapshot_id,
-            "captured_at": utc_now(),
-            "processes": [],
-        }
-    captured_at = utc_now()
-    captured_processes: list[dict[str, Any]] = []
+        return set()
+    captured_pids: set[int] = set()
     for process in processes:
         try:
             raw = adb.read_process_maps(process.pid)
@@ -180,21 +174,10 @@ def capture_maps_snapshot(
                 }
             )
             continue
-        parsed = parse_proc_maps(raw)
-        captured_processes.append(
-            {
-                "pid": process.pid,
-                "uid": process.uid,
-                "name": process.name,
-                "maps_path": str(raw_path),
-                "mapping_count": len(parsed.mappings),
-                "invalid_lines": parsed.invalid_lines,
-            }
-        )
+        captured_pids.add(process.pid)
 
-    found = {process["pid"] for process in captured_processes}
     if wanted is not None and not process_lookup_failed:
-        for pid in sorted(wanted - found):
+        for pid in sorted(wanted - captured_pids):
             warnings.append(
                 {
                     "code": "MAPS_UNAVAILABLE",
@@ -213,11 +196,7 @@ def capture_maps_snapshot(
             }
         )
 
-    return {
-        "snapshot_id": snapshot_id,
-        "captured_at": captured_at,
-        "processes": captured_processes,
-    }
+    return captured_pids
 
 
 class ModuleIndex:
