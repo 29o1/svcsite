@@ -43,7 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser.parse_args(argument_list)
         module = modules[args.command]
-        operation = module.operation(args)
+        operation = module.NAME
         compact = args.json
         data = module.run(args)
         payload = success_payload(operation, data)

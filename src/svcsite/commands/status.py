@@ -15,10 +15,6 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     add_common_options(parser)
 
 
-def operation(args: argparse.Namespace) -> str:
-    return NAME
-
-
 def run(args: argparse.Namespace) -> dict[str, Any]:
     serial, controller = build_controller(args)
     return {
