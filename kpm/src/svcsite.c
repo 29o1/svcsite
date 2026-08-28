@@ -250,7 +250,6 @@ static volatile int g_target_uid = -1;       // UID 过滤，-1=全部，>=0=只
 static volatile int g_target_tgid = -1;      // TGID 过滤，-1=UID 内全部，>0=精确进程
 static volatile unsigned long g_nr_bitmap[BITMAP_LONGS]; // 位图：哪些 syscall NR 要记录
 static volatile unsigned int g_seq = 0;      // 事件序列号（全局自增）
-static volatile unsigned int g_total = 0;    // 总事件计数
 
 static int target_matches(int uid)
 {
@@ -326,7 +325,6 @@ static volatile int g_ev_tail = 0;       // 读取位置（写文件线程消费
 static volatile int g_ev_count = 0;      // 当前缓冲区中的事件数
 static volatile unsigned int g_ev_dropped = 0;
 static volatile int g_ev_lock = 0;
-static volatile int g_hooks_installed = 0;
 static volatile int g_active = 0;
 
 static struct task_struct *g_writer_task = 0;
@@ -1770,8 +1768,6 @@ static void push_event(int nr, int uid,
         g_ev_tail = (g_ev_tail + 1) % MAX_EVENTS;
         g_ev_dropped++;
     }
-    g_total++;
-
     ev_unlock();
 }
 
@@ -1948,6 +1944,18 @@ static hook_entry_t tier2_hooks[] = {
     { 98, 6, 0, 0 },   /* futex */
 };
 #define TIER2_COUNT (sizeof(tier2_hooks) / sizeof(tier2_hooks[0]))
+
+static int count_installed_hooks(void)
+{
+    int i, count = 0;
+    for (i = 0; i < (int)TIER1_COUNT; i++) {
+        if (tier1_hooks[i].active) count++;
+    }
+    for (i = 0; i < (int)TIER2_COUNT; i++) {
+        if (tier2_hooks[i].active) count++;
+    }
+    return count;
+}
 
 static int install_hook(hook_entry_t *h);
 
@@ -2151,7 +2159,6 @@ static int install_hook(hook_entry_t *h)
         if (err == HOOK_NO_ERR) {
             h->active = 1;
             h->method = HOOK_INLINE;
-            g_hooks_installed++;
             return 0;
         }
     }
@@ -2162,7 +2169,6 @@ static int install_hook(hook_entry_t *h)
     if (err == HOOK_NO_ERR) {
         h->active = 1;
         h->method = HOOK_FP;
-        g_hooks_installed++;
         return 0;
     }
 
@@ -2177,7 +2183,6 @@ static void remove_hook(hook_entry_t *h)
     else
         fp_unhook_syscalln(h->nr, (void *)before_generic, hook_after_for_nr(h->nr));
     h->active = 0;
-    g_hooks_installed--;
 }
 
 static int install_tier1(void)
@@ -2563,6 +2568,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
 
     /* ---- status ---- */
     if (!strcmp(args, "status")) {
+        int hooks_installed = count_installed_hooks();
         int nr_logging = 0, i;
         for (i = 0; i < MAX_NR; i++) {
             if (bitmap_test(g_nr_bitmap, i)) nr_logging++;
@@ -2575,8 +2581,8 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
             "\"logging_nrs\":[",
             SVCSITE_KPM_VERSION,
             g_enabled ? "true" : "false",
-            g_target_uid, g_target_tgid, g_hooks_installed,
-            nr_logging, g_total,
+            g_target_uid, g_target_tgid, hooks_installed,
+            nr_logging, g_seq,
             g_ev_count < MAX_EVENTS ? g_ev_count : MAX_EVENTS,
             g_ev_dropped);
 
@@ -2673,7 +2679,6 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
         g_ev_count = 0;
         g_ev_dropped = 0;
         g_seq = 0;
-        g_total = 0;
         ev_unlock();
         n = snprintf(buf, blen, "{\"ok\":true,\"cleared\":true}");
     }
@@ -2710,8 +2715,6 @@ static long svc_init(const char *args, const char *event, void *__user reserved)
     g_ev_count = 0;
     g_ev_dropped = 0;
     g_seq = 0;
-    g_total = 0;
-    g_hooks_installed = 0;
     g_active = 0;
 
     if (init_events_storage() != 0) {
