@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from functools import lru_cache
 import json
 from pathlib import Path, PurePosixPath
@@ -55,7 +54,6 @@ class _IndexedMapping:
 @dataclass(frozen=True)
 class _ProcessSnapshot:
     snapshot_id: Any
-    captured_at: Any
     starts: tuple[int, ...]
     mappings: tuple[_IndexedMapping, ...]
 
@@ -213,7 +211,6 @@ class ModuleIndex:
                 EXIT_DATA,
                 {"path": str(source)},
             )
-        self.snapshots = snapshots
         self._by_pid = self._build_index(snapshots)
 
     @staticmethod
@@ -257,7 +254,6 @@ class ModuleIndex:
                 by_pid.setdefault(pid, []).append(
                     _ProcessSnapshot(
                         snapshot.get("snapshot_id"),
-                        snapshot.get("captured_at"),
                         tuple(item.start for item in indexed),
                         tuple(indexed),
                     )
@@ -307,13 +303,6 @@ class ModuleIndex:
                 continue
             try:
                 raw = raw_path.read_text(encoding="utf-8")
-                captured_at = (
-                    datetime.fromtimestamp(
-                        raw_path.stat().st_mtime, timezone.utc
-                    )
-                    .isoformat(timespec="milliseconds")
-                    .replace("+00:00", "Z")
-                )
             except OSError as exc:
                 raise SvcSiteError(
                     "MODULES_INVALID",
@@ -325,7 +314,6 @@ class ModuleIndex:
             if snapshot is None:
                 snapshot = {
                     "snapshot_id": snapshot_id,
-                    "captured_at": captured_at,
                     "processes": [],
                 }
                 snapshots_by_id[snapshot_id] = snapshot
@@ -361,9 +349,7 @@ class ModuleIndex:
             resolved = self._resolved_payload(mapping, address)
             return {
                 "runtime": hex_str(address),
-                "pid": pid,
                 "snapshot_id": snapshot.snapshot_id,
-                "captured_at": snapshot.captured_at,
                 **resolved,
             }
         return None
@@ -374,7 +360,6 @@ class ModuleIndex:
         address: int,
     ) -> dict[str, Any]:
         start = indexed.start
-        end = indexed.end
         file_offset = indexed.file_offset
         mapping = indexed.mapping
         module_base = start - file_offset
@@ -396,10 +381,5 @@ class ModuleIndex:
             "module": mapping.get("module"),
             "module_id": module_id,
             "path": path,
-            "module_base": hex_str(module_base),
             "module_offset": hex_str(address - module_base),
-            "mapping_start": hex_str(start),
-            "mapping_end": hex_str(end),
-            "file_offset": hex_str(file_offset),
-            "permissions": mapping.get("permissions"),
         }

@@ -86,13 +86,17 @@ class ProcMapsTests(unittest.TestCase):
             resolved = index.resolve(123, 0x7000000234) if index else None
 
         self.assertIsNotNone(resolved)
-        self.assertEqual(resolved["module"], "libtarget.so")
         self.assertEqual(
-            resolved["module_id"],
-            "file:103:02:42:/data/app/libtarget.so",
+            resolved,
+            {
+                "runtime": "0x7000000234",
+                "snapshot_id": "post-launch",
+                "module": "libtarget.so",
+                "module_id": "file:103:02:42:/data/app/libtarget.so",
+                "path": "/data/app/libtarget.so",
+                "module_offset": "0x1234",
+            },
         )
-        self.assertEqual(resolved["module_base"], "0x6ffffff000")
-        self.assertEqual(resolved["module_offset"], "0x1234")
 
     def test_reads_legacy_modules_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

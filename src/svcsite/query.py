@@ -99,42 +99,22 @@ def _event_payload(
     ]
     if module_index is None:
         return payload
-    registers["pc_resolved"] = _resolution_payload(
-        module_index.resolve(event.tgid, event.pc)
-    )
+    registers["pc_resolved"] = module_index.resolve(event.tgid, event.pc)
     registers["caller_callsite_resolved"] = (
-        _resolution_payload(module_index.resolve(event.tgid, caller_callsite))
+        module_index.resolve(event.tgid, caller_callsite)
         if caller_callsite is not None
         else None
     )
-    registers["clone_fn_resolved"] = _resolution_payload(
-        module_index.resolve(event.tgid, event.clone_fn)
+    registers["clone_fn_resolved"] = module_index.resolve(
+        event.tgid, event.clone_fn
     )
     payload["backtrace_callsites_resolved"] = [
-        _resolution_payload(module_index.resolve(event.tgid, address))
+        module_index.resolve(event.tgid, address)
         if address is not None
         else None
         for address in backtrace_callsites
     ]
     return payload
-
-
-_COMPACT_RESOLUTION_FIELDS = (
-    "runtime",
-    "snapshot_id",
-    "module",
-    "module_id",
-    "path",
-    "module_offset",
-)
-
-
-def _resolution_payload(
-    resolved: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if resolved is None:
-        return None
-    return {key: resolved.get(key) for key in _COMPACT_RESOLUTION_FIELDS}
 
 
 def event_callsites(
