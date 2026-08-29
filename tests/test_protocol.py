@@ -23,6 +23,8 @@ def make_event(
     comm: bytes = b"fixture",
     desc: bytes = b'path="/proc/self/status"',
     backtrace: tuple[int, ...] = (0x5000, 0x6000),
+    pc: int = 0x1000,
+    caller: int = 0x2000,
     version: int = EVENT_VERSION,
 ) -> bytes:
     max_backtrace = 7 if version == 1 else 16
@@ -41,8 +43,8 @@ def make_event(
         tgid,
         tid,
         uid,
-        0x1000,
-        0x2000,
+        pc,
+        caller,
         0x3000,
         0x4000,
         0,

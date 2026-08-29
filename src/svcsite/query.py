@@ -78,17 +78,24 @@ def _matches(
     return True
 
 
+def _return_callsites(
+    event: Event,
+) -> tuple[int | None, tuple[int | None, ...]]:
+    caller = event.caller - 4 if event.caller >= 4 else None
+    backtrace = tuple(
+        None if address == event.pc or address < 4 else address - 4
+        for address in event.backtrace
+    )
+    return caller, backtrace
+
+
 def _event_payload(
     event: Event,
     syscall_names: dict[int, str],
     module_index: ModuleIndex | None,
 ) -> dict[str, Any]:
     payload = event.to_dict(syscall_names)
-    caller_callsite = event.caller - 4 if event.caller >= 4 else None
-    backtrace_callsites = [
-        None if address == event.pc or address < 4 else address - 4
-        for address in event.backtrace
-    ]
+    caller_callsite, backtrace_callsites = _return_callsites(event)
     registers = payload["registers"]
     registers["caller_callsite"] = (
         hex_str(caller_callsite) if caller_callsite is not None else None
@@ -121,13 +128,14 @@ def event_callsites(
     event: Event,
     module_index: ModuleIndex,
 ) -> list[dict[str, Any]]:
+    caller_callsite, backtrace_callsites = _return_callsites(event)
     candidates: list[tuple[str, int | None, int]] = [("pc", None, event.pc)]
-    if event.caller >= 4:
-        candidates.append(("caller", None, event.caller - 4))
+    if caller_callsite is not None:
+        candidates.append(("caller", None, caller_callsite))
     candidates.extend(
-        ("backtrace", depth, address - 4)
-        for depth, address in enumerate(event.backtrace)
-        if address != event.pc and address >= 4
+        ("backtrace", depth, address)
+        for depth, address in enumerate(backtrace_callsites)
+        if address is not None
     )
     callsites: list[dict[str, Any]] = []
     for frame, depth, address in candidates:

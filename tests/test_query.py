@@ -9,6 +9,32 @@ from svcsite.query import run_query
 
 
 class QueryTests(unittest.TestCase):
+    def test_return_address_callsite_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory)
+            (session / "events.bin").write_bytes(
+                make_event(
+                    caller=3,
+                    backtrace=(0x1000, 3, 4, 0x2000),
+                )
+            )
+
+            result = run_query(
+                session=str(session),
+                syscalls=(),
+                pid=None,
+                tid=None,
+                contains=None,
+                limit=1,
+            )
+
+        event = result["events"][0]
+        self.assertIsNone(event["registers"]["caller_callsite"])
+        self.assertEqual(
+            event["backtrace_callsites"],
+            [None, None, "0x0", "0x1ffc"],
+        )
+
     def test_filters_and_limits_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             session = Path(directory)
