@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Sequence
+from typing import Any, Sequence
 
 from svcsite import __version__
 from svcsite.commands import COMMAND_MODULES
-from svcsite.errors import EXIT_INTERNAL, EXIT_USAGE, SvcSiteError
-from svcsite.output import error_payload, success_payload, write_payload
+from svcsite.errors import EXIT_USAGE, SvcSiteError
+from svcsite.output import execute_operation
 
 
 class SvcSiteArgumentParser(argparse.ArgumentParser):
@@ -40,30 +40,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     compact = "--json" in argument_list
 
-    try:
+    def prepare() -> tuple[str, bool, Any]:
         args = parser.parse_args(argument_list)
         module = modules[args.command]
-        operation = module.NAME
-        compact = args.json
-        data = module.run(args)
-        payload = success_payload(operation, data)
-        exit_code = 0
-    except SvcSiteError as exc:
-        payload = error_payload(operation, exc)
-        exit_code = exc.exit_code
-    except KeyboardInterrupt:
-        error = SvcSiteError("INTERRUPTED", "operation was interrupted", 130)
-        payload = error_payload(operation, error)
-        exit_code = error.exit_code
-    except Exception as exc:
-        error = SvcSiteError(
-            "INTERNAL_ERROR",
-            "unexpected internal error",
-            EXIT_INTERNAL,
-            {"exception": type(exc).__name__},
-        )
-        payload = error_payload(operation, error)
-        exit_code = error.exit_code
+        return module.NAME, args.json, lambda: module.run(args)
 
-    write_payload(payload, sys.stdout, compact=compact)
-    return exit_code
+    return execute_operation(
+        operation,
+        compact=compact,
+        prepare=prepare,
+        stream=sys.stdout,
+    )

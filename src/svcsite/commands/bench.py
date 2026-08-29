@@ -10,8 +10,8 @@ from svcsite.commands._common import (
     positive_integer,
     positive_timeout,
 )
-from svcsite.errors import EXIT_INTERNAL, SvcSiteError
-from svcsite.output import error_payload, success_payload, write_payload
+from svcsite.output import execute_operation
+
 
 def build_parser() -> argparse.ArgumentParser:
     from svcsite.cli import SvcSiteArgumentParser
@@ -119,30 +119,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"bench.{argument_list[0]}" if argument_list else "bench"
     )
     compact = "--json" in argument_list
-    try:
+
+    def prepare() -> tuple[str, bool, Any]:
         args = parser.parse_args(argument_list)
-        operation_name = f"bench.{args.bench_command}"
-        compact = args.json
-        payload = success_payload(operation_name, run(args))
-        exit_code = 0
-    except SvcSiteError as exc:
-        payload = error_payload(operation_name, exc)
-        exit_code = exc.exit_code
-    except KeyboardInterrupt:
-        error = SvcSiteError("INTERRUPTED", "operation was interrupted", 130)
-        payload = error_payload(operation_name, error)
-        exit_code = error.exit_code
-    except Exception as exc:
-        error = SvcSiteError(
-            "INTERNAL_ERROR",
-            "unexpected internal error",
-            EXIT_INTERNAL,
-            {"exception": type(exc).__name__},
-        )
-        payload = error_payload(operation_name, error)
-        exit_code = error.exit_code
-    write_payload(payload, sys.stdout, compact=compact)
-    return exit_code
+        return f"bench.{args.bench_command}", args.json, lambda: run(args)
+
+    return execute_operation(
+        operation_name,
+        compact=compact,
+        prepare=prepare,
+        stream=sys.stdout,
+    )
 
 
 if __name__ == "__main__":
