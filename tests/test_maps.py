@@ -1,7 +1,9 @@
+import gc
 import json
 from pathlib import Path
 import tempfile
 import unittest
+import weakref
 
 from svcsite.adb import ProcessInfo
 from svcsite.constants import MODULES_SCHEMA
@@ -39,6 +41,19 @@ def modules_document() -> dict:
 
 
 class ProcMapsTests(unittest.TestCase):
+    def test_resolve_cache_does_not_keep_index_alive(self) -> None:
+        index = ModuleIndex(Path("fixture-modules.json"), modules_document())
+
+        self.assertIs(
+            index.resolve(123, 0x7000000234),
+            index.resolve(123, 0x7000000234),
+        )
+        reference = weakref.ref(index)
+        del index
+        gc.collect()
+
+        self.assertIsNone(reference())
+
     def test_capture_snapshot_returns_written_pids_and_raw_maps(self) -> None:
         class FakeAdb:
             def processes_for_uid(self, uid: int) -> list[ProcessInfo]:

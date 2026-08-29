@@ -212,6 +212,9 @@ class ModuleIndex:
                 {"path": str(source)},
             )
         self._by_pid = self._build_index(snapshots)
+        self._resolve_cached = lru_cache(maxsize=32768)(
+            self._resolve_uncached
+        )
 
     @staticmethod
     def _build_index(
@@ -335,8 +338,14 @@ class ModuleIndex:
             },
         )
 
-    @lru_cache(maxsize=32768)
     def resolve(self, pid: int, address: int) -> dict[str, Any] | None:
+        return self._resolve_cached(pid, address)
+
+    def _resolve_uncached(
+        self,
+        pid: int,
+        address: int,
+    ) -> dict[str, Any] | None:
         if address <= 0:
             return None
         for snapshot in self._by_pid.get(pid, ()):
