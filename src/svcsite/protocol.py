@@ -32,8 +32,6 @@ def _signed_u64(value: int) -> int:
 @dataclass(frozen=True)
 class Event:
     version: int
-    flags: int
-    record_length: int
     seq: int
     nr: int
     tgid: int
@@ -150,8 +148,6 @@ class EventStream(Iterator[Event]):
             bt_depth = min(values[21], max_backtrace)
             event = Event(
                 version=values[1],
-                flags=values[2],
-                record_length=values[3],
                 seq=values[4],
                 nr=values[5],
                 tgid=values[6],
