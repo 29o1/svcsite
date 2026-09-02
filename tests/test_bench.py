@@ -7,17 +7,16 @@ import unittest
 from unittest.mock import patch
 
 from test_protocol import make_event
-from svcsite.bench import (
-    aggregate as _aggregate,
+from svcsite.constants import MODULES_SCHEMA
+from tools.svcsite_bench.__main__ import main as bench_main
+from tools.svcsite_bench.aggregate import aggregate as _aggregate
+from tools.svcsite_bench.compare import (
     compare_reports,
-    compute_quality_metrics,
-    format_metric_value,
-    iqr,
-    percentile,
     render_compare_table,
 )
-from svcsite.commands.bench import main as bench_main
-from svcsite.constants import BENCH_SCHEMA, MODULES_SCHEMA
+from tools.svcsite_bench.constants import BENCH_SCHEMA
+from tools.svcsite_bench.metrics import format_metric_value, iqr, percentile
+from tools.svcsite_bench.quality import compute_quality_metrics
 
 
 class StatHelperTests(unittest.TestCase):

@@ -89,7 +89,7 @@ hooks; `stop`, `capture`, and module loading affect device state.
 Benchmark the current build against a controlled workload:
 
 ```bash
-PYTHONPATH=src python3 -m svcsite.commands.bench run \
+PYTHONPATH=src python3 -m tools.svcsite_bench run \
   --device SERIAL \
   --kpm /absolute/path/to/svcsite.kpm \
   --json
@@ -98,7 +98,7 @@ PYTHONPATH=src python3 -m svcsite.commands.bench run \
 Compare two bench reports (offline, read-only):
 
 ```bash
-PYTHONPATH=src python3 -m svcsite.commands.bench compare \
+PYTHONPATH=src python3 -m tools.svcsite_bench compare \
   /absolute/path/to/bench/OLD_RUN/report.json \
   /absolute/path/to/bench/NEW_RUN/report.json \
   --json

@@ -6,11 +6,11 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
-from svcsite.bench.metrics import METRIC_SPECS, format_metric_value, lookup
+from tools.svcsite_bench.metrics import METRIC_SPECS, format_metric_value, lookup
 
 
 def git_info() -> dict[str, Any] | None:
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[2]
     try:
         sha = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],

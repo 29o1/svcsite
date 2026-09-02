@@ -24,16 +24,16 @@ from typing import Any
 
 from svcsite import __version__
 from svcsite.adb import AdbClient
-from svcsite.bench.aggregate import aggregate, median_session
-from svcsite.bench.metrics import percentile
-from svcsite.bench.quality import compute_quality_metrics
-from svcsite.bench.report import git_info, report_markdown
 from svcsite.capture import CaptureOptions, run_capture
 from svcsite.config import read_superkey
-from svcsite.constants import BENCH_SCHEMA
 from svcsite.errors import EXIT_DATA, SvcSiteError
 from svcsite.kpm import KpmController, require_root
 from svcsite.session import write_json
+from tools.svcsite_bench.aggregate import aggregate, median_session
+from tools.svcsite_bench.constants import BENCH_SCHEMA
+from tools.svcsite_bench.metrics import percentile
+from tools.svcsite_bench.quality import compute_quality_metrics
+from tools.svcsite_bench.report import git_info, report_markdown
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ def _progress(message: str) -> None:
 
 def _query_environment() -> dict[str, str]:
     environment = dict(os.environ)
-    source_root = str(Path(__file__).resolve().parents[2])
+    source_root = str(Path(__file__).resolve().parents[2] / "src")
     existing = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = (
         source_root if not existing else source_root + os.pathsep + existing

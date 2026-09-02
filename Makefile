@@ -18,7 +18,7 @@ kpm:
 	$(MAKE) -C kpm KP_DIR="$(KP_DIR)"
 
 bench:
-	PYTHONPATH=src $(PYTHON) -m svcsite.commands.bench run \
+	PYTHONPATH=src $(PYTHON) -m tools.svcsite_bench run \
 	  --package $(BENCH_PACKAGE) \
 	  --kpm $(CURDIR)/kpm/svcsite.kpm \
 	  $(BENCH_DEVICE_FLAG) \

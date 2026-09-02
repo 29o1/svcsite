@@ -5,7 +5,7 @@ from __future__ import annotations
 import statistics
 from typing import Any
 
-from svcsite.bench.metrics import iqr, percentile
+from tools.svcsite_bench.metrics import iqr, percentile
 
 
 def median_session(trials: list[dict[str, Any]]) -> dict[str, Any]:

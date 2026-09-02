@@ -1,4 +1,4 @@
-"""Metric specs and shared statistics helpers for bench runs and reports."""
+"""Metric definitions and statistics helpers for bench reports."""
 
 from __future__ import annotations
 

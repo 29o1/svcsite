@@ -7,10 +7,10 @@ from pathlib import Path
 import statistics
 from typing import Any
 
-from svcsite.bench.metrics import percentile
 from svcsite.maps import ModuleIndex
 from svcsite.protocol import open_event_stream
 from svcsite.query import event_callsites
+from tools.svcsite_bench.metrics import percentile
 
 
 def compute_quality_metrics(session_dir: str | Path) -> dict[str, Any]:

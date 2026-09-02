@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from svcsite.bench.metrics import METRIC_SPECS, format_metric_value, lookup
-from svcsite.constants import BENCH_SCHEMA
 from svcsite.errors import EXIT_DATA, SvcSiteError
+from tools.svcsite_bench.constants import BENCH_SCHEMA
+from tools.svcsite_bench.metrics import METRIC_SPECS, format_metric_value, lookup
 
 
 def _load_report(path_value: str) -> dict[str, Any]:

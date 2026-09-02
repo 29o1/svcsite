@@ -4,13 +4,14 @@ import argparse
 import sys
 from typing import Any, Sequence
 
-from svcsite.bench import BenchOptions, render_compare_table, run_bench, run_compare
 from svcsite.commands._common import (
     add_common_options,
     positive_integer,
     positive_timeout,
 )
 from svcsite.output import execute_operation
+from tools.svcsite_bench.compare import render_compare_table, run_compare
+from tools.svcsite_bench.run import BenchOptions, run_bench
 
 
 def build_parser() -> argparse.ArgumentParser:
