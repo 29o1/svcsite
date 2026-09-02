@@ -5,9 +5,12 @@ import sys
 from typing import Any, Sequence
 
 from svcsite import __version__
-from svcsite.commands import COMMAND_MODULES
+from svcsite.commands import capture, doctor, query, status, stop
 from svcsite.errors import EXIT_USAGE, SvcSiteError
 from svcsite.output import execute_operation
+
+
+COMMAND_MODULES = (doctor, status, stop, capture, query)
 
 
 class SvcSiteArgumentParser(argparse.ArgumentParser):
