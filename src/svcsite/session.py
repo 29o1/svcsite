@@ -8,7 +8,6 @@ from pathlib import Path
 import tempfile
 from typing import Any, Mapping
 
-from svcsite.constants import SESSION_SCHEMA
 from svcsite.errors import EXIT_DATA, SvcSiteError
 from svcsite.protocol import open_event_stream
 
@@ -143,7 +142,3 @@ def resolve_session(path_value: str | Path) -> tuple[Path, Path, dict[str, Any]]
                 {"path": str(manifest_path), "reason": str(exc)},
             ) from exc
     return session_dir, events_path, manifest
-
-
-def base_manifest() -> dict[str, Any]:
-    return {"schema_version": SESSION_SCHEMA}

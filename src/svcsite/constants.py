@@ -36,21 +36,14 @@ REVERSE_BASIC_SYSCALLS = (
 KNOWN_SYSCALLS = dict(REVERSE_BASIC_SYSCALLS)
 KNOWN_SYSCALL_NAMES = {number: name for name, number in REVERSE_BASIC_SYSCALLS}
 
-# These are the KPM's statically declared hooks.  The parameter count for each
-# was reviewed in the module source; arbitrary syscall numbers are deliberately
-# not dynamically hooked by the Agent-facing CLI.
-TIER1_SYSCALL_NUMBERS = frozenset(
+# The KPM has a statically reviewed arity for exactly these hooks. Arbitrary
+# syscall numbers are deliberately not dynamically hooked by the Agent CLI.
+SUPPORTED_SYSCALL_NUMBERS = frozenset(
     (
-        25, 29, 35, 48, 56, 57, 61, 62, 63, 64, 78, 79, 80, 93, 94, 97,
-        105, 117, 129, 131, 134, 135, 144, 146, 147, 167, 198, 200, 203,
-        206, 207, 214, 215, 220, 221, 222, 226, 232, 261, 268, 273, 277,
-        279, 280, 291, 435,
+        5, 8, 21, 25, 27, 29, 34, 35, 38, 39, 40, 48, 53, 54, 56, 57, 61,
+        62, 63, 64, 78, 79, 80, 93, 94, 97, 98, 105, 106, 117, 129, 131,
+        134, 135, 144, 146, 147, 167, 198, 200, 201, 202, 203, 206, 207,
+        208, 210, 211, 212, 214, 215, 220, 221, 222, 226, 232, 233, 242,
+        261, 268, 270, 271, 273, 276, 277, 279, 280, 281, 291, 435,
     )
 )
-TIER2_SYSCALL_NUMBERS = frozenset(
-    (
-        5, 8, 21, 27, 34, 38, 39, 40, 53, 54, 98, 106, 201, 202, 208,
-        210, 211, 212, 233, 242, 270, 271, 276, 281,
-    )
-)
-SUPPORTED_SYSCALL_NUMBERS = TIER1_SYSCALL_NUMBERS | TIER2_SYSCALL_NUMBERS

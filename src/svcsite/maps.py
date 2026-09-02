@@ -38,12 +38,6 @@ def _module_id(
 
 
 @dataclass(frozen=True)
-class ParsedMaps:
-    mappings: tuple[dict[str, Any], ...]
-    invalid_lines: int
-
-
-@dataclass(frozen=True)
 class _IndexedMapping:
     start: int
     end: int
@@ -58,16 +52,14 @@ class _ProcessSnapshot:
     mappings: tuple[_IndexedMapping, ...]
 
 
-def parse_proc_maps(raw: str) -> ParsedMaps:
+def parse_proc_maps(raw: str) -> tuple[dict[str, Any], ...]:
     mappings: list[dict[str, Any]] = []
-    invalid_lines = 0
     for raw_line in raw.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         fields = line.split(maxsplit=5)
         if len(fields) < 5:
-            invalid_lines += 1
             continue
         region, permissions, file_offset, device, inode_text = fields[:5]
         path = fields[5] if len(fields) == 6 else ""
@@ -78,10 +70,8 @@ def parse_proc_maps(raw: str) -> ParsedMaps:
             offset = int(file_offset, 16)
             inode = int(inode_text)
         except (ValueError, TypeError):
-            invalid_lines += 1
             continue
         if end <= start:
-            invalid_lines += 1
             continue
         mappings.append(
             {
@@ -97,7 +87,7 @@ def parse_proc_maps(raw: str) -> ParsedMaps:
                 "module_id": _module_id(path, device, inode),
             }
         )
-    return ParsedMaps(tuple(mappings), invalid_lines)
+    return tuple(mappings)
 
 
 def capture_maps_snapshot(
@@ -324,7 +314,7 @@ class ModuleIndex:
             snapshot["processes"].append(
                 {
                     "pid": int(pid_text),
-                    "mappings": list(parse_proc_maps(raw).mappings),
+                    "mappings": list(parse_proc_maps(raw)),
                 }
             )
         if not snapshots:

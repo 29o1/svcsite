@@ -13,13 +13,13 @@ from svcsite.constants import (
     KNOWN_SYSCALLS,
     MODULE_NAME,
     REVERSE_BASIC_SYSCALLS,
+    SESSION_SCHEMA,
     SUPPORTED_SYSCALL_NUMBERS,
 )
 from svcsite.errors import EXIT_KPM, EXIT_USAGE, SvcSiteError
 from svcsite.kpm import KpmController, require_root
 from svcsite.maps import capture_maps_snapshot
 from svcsite.session import (
-    base_manifest,
     create_session_directory,
     sha256_file,
     summarize_event_file,
@@ -400,7 +400,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         for number in syscall_numbers
     ]
     manifest = {
-        **base_manifest(),
+        "schema_version": SESSION_SCHEMA,
         "session_id": session_dir.name,
         "started_at": started_at,
         "ended_at": ended_at,

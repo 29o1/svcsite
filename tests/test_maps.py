@@ -16,7 +16,7 @@ MAPS_TEXT = """7000000000-7000010000 r-xp 00001000 103:02 42 /data/app/libtarget
 
 
 def modules_document() -> dict:
-    parsed = parse_proc_maps(MAPS_TEXT)
+    mappings = parse_proc_maps(MAPS_TEXT)
     return {
         "schema_version": MODULES_SCHEMA,
         "session_id": "fixture",
@@ -30,9 +30,8 @@ def modules_document() -> dict:
                         "uid": 10300,
                         "name": "io.target",
                         "maps_path": "/tmp/123.maps",
-                        "mapping_count": len(parsed.mappings),
-                        "invalid_lines": parsed.invalid_lines,
-                        "mappings": list(parsed.mappings),
+                        "mapping_count": len(mappings),
+                        "mappings": list(mappings),
                     }
                 ],
             }
@@ -81,16 +80,15 @@ class ProcMapsTests(unittest.TestCase):
         self.assertEqual(warnings, [])
 
     def test_parses_module_and_anonymous_mapping(self) -> None:
-        parsed = parse_proc_maps(MAPS_TEXT)
+        mappings = parse_proc_maps(MAPS_TEXT)
 
-        self.assertEqual(len(parsed.mappings), 2)
-        self.assertEqual(parsed.mappings[0]["module"], "libtarget.so")
+        self.assertEqual(len(mappings), 2)
+        self.assertEqual(mappings[0]["module"], "libtarget.so")
         self.assertEqual(
-            parsed.mappings[0]["module_id"],
+            mappings[0]["module_id"],
             "file:103:02:42:/data/app/libtarget.so",
         )
-        self.assertEqual(parsed.mappings[1]["module"], "[anon:fixture]")
-        self.assertEqual(parsed.invalid_lines, 0)
+        self.assertEqual(mappings[1]["module"], "[anon:fixture]")
 
     def test_resolves_runtime_address_to_module_offset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -167,18 +165,18 @@ class ProcMapsTests(unittest.TestCase):
         self.assertEqual(resolved["snapshot_id"], "pre-stop")
 
     def test_same_basename_has_distinct_module_ids(self) -> None:
-        parsed = parse_proc_maps(
+        mappings = parse_proc_maps(
             "1000-2000 r-xp 00000000 103:02 11 /data/app/one/base.apk\n"
             "3000-4000 r-xp 00000000 103:02 12 /data/app/two/base.apk\n"
         )
 
         self.assertEqual(
-            [mapping["module"] for mapping in parsed.mappings],
+            [mapping["module"] for mapping in mappings],
             ["base.apk", "base.apk"],
         )
         self.assertNotEqual(
-            parsed.mappings[0]["module_id"],
-            parsed.mappings[1]["module_id"],
+            mappings[0]["module_id"],
+            mappings[1]["module_id"],
         )
 
 
