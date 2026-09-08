@@ -153,12 +153,12 @@ class ProcMapsTests(unittest.TestCase):
                 MAPS_TEXT, encoding="utf-8"
             )
             (maps_dir / "pre-stop-123.maps").write_text(
-                "8000000000-8000010000 r-xp 00001000 103:02 43 /data/app/other.so\n",
+                "7000000000-7000010000 r-xp 00001000 103:02 43 /data/app/other.so\n",
                 encoding="utf-8",
             )
 
             index = ModuleIndex.from_session(session)
-            resolved = index.resolve(123, 0x8000000234) if index else None
+            resolved = index.resolve(123, 0x7000000234) if index else None
 
         self.assertIsNotNone(resolved)
         self.assertEqual(resolved["module"], "other.so")

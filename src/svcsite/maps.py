@@ -287,7 +287,6 @@ class ModuleIndex:
         maps_dir = session_dir / "maps"
         if not maps_dir.is_dir():
             return None
-        snapshots: list[dict[str, Any]] = []
         snapshots_by_id: dict[str, dict[str, Any]] = {}
         for raw_path in sorted(maps_dir.glob("*.maps")):
             stem = raw_path.name.removesuffix(".maps")
@@ -310,21 +309,20 @@ class ModuleIndex:
                     "processes": [],
                 }
                 snapshots_by_id[snapshot_id] = snapshot
-                snapshots.append(snapshot)
             snapshot["processes"].append(
                 {
                     "pid": int(pid_text),
                     "mappings": list(parse_proc_maps(raw)),
                 }
             )
-        if not snapshots:
+        if not snapshots_by_id:
             return None
         return cls(
             maps_dir,
             {
                 "schema_version": MODULES_SCHEMA,
                 "session_id": session_dir.name,
-                "snapshots": snapshots,
+                "snapshots": list(snapshots_by_id.values()),
             },
         )
 

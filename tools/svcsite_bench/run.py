@@ -28,7 +28,7 @@ from svcsite.capture import CaptureOptions, run_capture
 from svcsite.config import read_superkey
 from svcsite.errors import EXIT_DATA, SvcSiteError
 from svcsite.kpm import KpmController, require_root
-from svcsite.session import write_json
+from svcsite.session import utc_now, write_json
 from tools.svcsite_bench.aggregate import aggregate, median_session
 from tools.svcsite_bench.constants import BENCH_SCHEMA
 from tools.svcsite_bench.metrics import percentile
@@ -143,9 +143,7 @@ def run_bench(options: BenchOptions) -> dict[str, Any]:
     sessions_root = output_root / "sessions"
     sessions_root.mkdir(parents=True, exist_ok=True)
     git = git_info()
-    generated_at = datetime.now(timezone.utc).isoformat(
-        timespec="milliseconds"
-    ).replace("+00:00", "Z")
+    generated_at = utc_now()
     run_id = (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         + "-"

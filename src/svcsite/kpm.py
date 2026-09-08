@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 from pathlib import Path
 import shlex
 from typing import Any
@@ -14,6 +13,7 @@ from svcsite.constants import (
     MODULE_NAME,
 )
 from svcsite.errors import EXIT_KPATCH, EXIT_KPM, EXIT_ROOT, SvcSiteError
+from svcsite.session import sha256_file
 
 
 _HEXDIGITS = frozenset("0123456789abcdef")
@@ -163,9 +163,7 @@ class KpmController:
     def ensure_module(self, local_path: str | Path) -> dict[str, Any]:
         """Converge the loaded module to the file at local_path.
 
-        A matching deployed fingerprint skips the reload entirely, so an
-        unchanged module costs one status round trip while a rebuilt one is
-        deployed on the next capture.
+        A matching deployed fingerprint skips the reload entirely.
         """
         path = Path(local_path).expanduser().resolve()
         if not path.is_file():
@@ -175,7 +173,7 @@ class KpmController:
                 EXIT_KPM,
                 {"path": str(path)},
             )
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = sha256_file(path)
         module_names = self.module_names()
         loaded = MODULE_NAME in module_names
         if loaded and self._read_deployed_marker() == digest:
@@ -215,7 +213,7 @@ class KpmController:
                 {"path": str(path)},
             )
 
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = sha256_file(path)
         remote_path = f"/data/local/tmp/{MODULE_NAME}-{digest[:12]}.kpm"
         self.adb.push(path, remote_path)
 
