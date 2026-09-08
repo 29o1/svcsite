@@ -4,10 +4,8 @@ import unittest
 
 from svcsite.errors import EXIT_DEVICE, EXIT_INTERNAL, SvcSiteError
 from svcsite.output import (
-    error_payload,
     execute_operation,
     success_payload,
-    write_payload,
 )
 
 
@@ -27,6 +25,7 @@ class OutputTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(rendered.count("\n"), 1)
+        self.assertTrue(payload["ok"])
         self.assertEqual(payload["operation"], "prepared")
         self.assertEqual(payload["data"]["value"], 7)
 
@@ -41,6 +40,7 @@ class OutputTests(unittest.TestCase):
         exit_code, payload, _ = self.execute(fail)
 
         self.assertEqual(exit_code, EXIT_DEVICE)
+        self.assertFalse(payload["ok"])
         self.assertEqual(payload["operation"], "prepared")
         self.assertEqual(payload["error"]["code"], "DEVICE_NOT_FOUND")
 
@@ -62,27 +62,6 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(exit_code, EXIT_INTERNAL)
         self.assertEqual(payload["error"]["code"], "INTERNAL_ERROR")
         self.assertEqual(payload["error"]["details"]["exception"], "ValueError")
-
-    def test_compact_output_is_one_json_line(self) -> None:
-        stream = io.StringIO()
-        write_payload(success_payload("doctor", {"device": "SERIAL"}), stream, compact=True)
-
-        rendered = stream.getvalue()
-        self.assertEqual(rendered.count("\n"), 1)
-        self.assertTrue(json.loads(rendered)["ok"])
-
-    def test_error_payload_contains_stable_code(self) -> None:
-        error = SvcSiteError(
-            "DEVICE_NOT_FOUND",
-            "device missing",
-            EXIT_DEVICE,
-            {"device": "SERIAL"},
-        )
-
-        payload = error_payload("doctor", error)
-
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"]["code"], "DEVICE_NOT_FOUND")
 
     def test_success_moves_operation_warnings_to_envelope(self) -> None:
         payload = success_payload(

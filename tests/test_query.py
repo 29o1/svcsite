@@ -71,24 +71,6 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result["counts"]["events_truncated"], 1)
         self.assertEqual(result["events"][0]["syscall"]["name"], "openat")
 
-    def test_unified_result_contains_events_and_callsites(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            session = Path(directory)
-            (session / "events.bin").write_bytes(make_event())
-
-            result = run_query(
-                session=str(session),
-                syscalls=(),
-                pid=None,
-                tid=None,
-                contains=None,
-                limit=100,
-            )
-
-        self.assertEqual(result["counts"]["matched"], 1)
-        self.assertEqual(len(result["events"]), 1)
-        self.assertEqual(result["callsites"], [])
-
     def test_enriches_addresses_when_modules_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             session = Path(directory)
@@ -229,6 +211,9 @@ class QueryTests(unittest.TestCase):
                 limit=1,
             )
 
+        self.assertEqual(result["counts"]["matched"], 1)
+        self.assertEqual(len(result["events"]), 1)
+        self.assertEqual(result["callsites"], [])
         self.assertFalse(result["address_resolution"]["available"])
         self.assertNotIn("pc_resolved", result["events"][0]["registers"])
         self.assertEqual(
