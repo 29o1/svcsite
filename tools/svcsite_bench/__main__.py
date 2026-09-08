@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--query-iterations",
         type=positive_integer,
         default=5,
-        help="query subprocess iterations per mode (default: 5)",
+        help="query subprocess iterations (default: 5)",
     )
     bench_run_parser.add_argument(
         "--target-mode",

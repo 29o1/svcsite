@@ -7,7 +7,7 @@
 
 /* svcsite implementation (svcsite.c)
  *
- * v8.1 Enhancements:
+ * Features:
  *   - Deep argument parsing for 50+ syscalls important for reverse engineering
  *   - User-space string resolution via compat_strncpy_from_user
  *   - sockaddr parsing (AF_INET/AF_INET6/AF_UNIX) for connect/bind/sendto
@@ -16,14 +16,11 @@
  *   - openat flags (O_RDONLY/O_WRONLY/O_RDWR/O_CREAT/O_TRUNC/O_APPEND...)
  *   - prctl option names, ptrace request names
  *   - ioctl cmd decode (BINDER/TIOCSCTTY/TCGETS etc)
- *   - write/sendto partial data preview (first 64 bytes hex+ascii)
- *   - Larger DESC_BUF for detailed output (1024 bytes)
- *   - Larger event ring buffer (8192 events)
+ *   - read/write/sendto partial data preview (up to DATA_PREVIEW bytes)
  *
  * Architecture:
  *   - Module load → hook all tier1 syscalls → wait disabled
- *   - CLI controls UID, syscall NR bitmap, and pause/resume
- *   - Bitmap-based NR filter + UID filter
+ *   - CLI controls UID/TGID, syscall NR bitmap, and pause/resume
  *
  * Official KPM API used:
  *   - inline_hook_syscalln(nr, narg, before, after, udata)
@@ -33,7 +30,7 @@
  *   - current_uid() from kputils.h
  *   - current from asm/current.h
  *   - compat_copy_to_user / compat_strncpy_from_user
- *   - raw_syscall0-6
+ *   - raw_syscall0
  */
 
 #include <compiler.h>        // KernelPatch 编译器宏
@@ -109,9 +106,8 @@ KPM_DESCRIPTION("svcsite");
 #define MAX_NR          512       // 支持的最大 syscall 号
 #define BITMAP_LONGS    (MAX_NR / 64 + 1) // bitmap 用 unsigned long 数组，每个 64 位
 #define EVENT_PATH      "/data/local/tmp/svcsite_events.bin"
-#define DESC_BUF_SIZE   1024      // 参数描述字符串缓冲区（v8.1 从小 buffer 扩大到 1024）
+#define DESC_BUF_SIZE   1024      // 参数描述字符串缓冲区
 #define PATH_BUF_SIZE   1024      // 路径字符串缓冲区
-#define SMALL_BUF       128
 #define DATA_PREVIEW    128       // read/write/sendto 的数据预览最多看前 128 字节
 
 /* ================================================================
@@ -295,7 +291,7 @@ typedef struct {
 
 
 /* Event record — expanded for detailed parsing */
-//这里参数的读取在内核态进行解析，但是调用地址返回地址在APK侧读取maps文件进行解析
+// 参数在内核态解析；原始地址由主机端结合 maps 快照解析。
 #define MAX_BT 16
 typedef struct {
     unsigned int seq;          // 事件序列号
@@ -482,8 +478,7 @@ static void free_events_storage(void)
 /* ================================================================
  * Bitmap operations
  * ================================================================ */
-//感觉这部分写的不是很好，最好是精准控制要hook哪些系统调用号，给他加进位图内
- static inline void bitmap_set(volatile unsigned long *bm, int bit)
+static inline void bitmap_set(volatile unsigned long *bm, int bit)
 {
     if (bit >= 0 && bit < MAX_NR)
         bm[bit / 64] |= (1UL << (bit % 64));
@@ -771,7 +766,7 @@ static int data_preview(char *buf, int blen, unsigned long uptr, unsigned long d
 }
 
 /* ================================================================
- * prctl option name decoder，这个函数蛮重要的，可以查看app对自己进行了什么操作
+ * prctl option name decoder
  * ================================================================ */
 static const char *decode_prctl_option(int opt)
 {
@@ -796,7 +791,7 @@ static const char *decode_prctl_option(int opt)
 }
 
 /* ================================================================
- * ptrace request name decoder ptrace模块挺有意思，可以配合这个函数做一些高级操作
+ * ptrace request name decoder
  * ================================================================ */
 static const char *decode_ptrace_request(long req)
 {
@@ -1091,7 +1086,6 @@ static void describe_args(int nr, unsigned long a0, unsigned long a1,
         break;
 
     case 220: /* clone */
-        //还应该解析其他的参数，比如哪个函数放进了线程中
         n = snprintf(desc, dlen, "flags=0x%lx", a0);
         if (a0 & 0x00000100) n += snprintf(desc + n, dlen - n, " CLONE_VM");
         if (a0 & 0x00000200) n += snprintf(desc + n, dlen - n, " CLONE_FS");
@@ -1808,7 +1802,6 @@ static void before_generic(hook_fargs4_t *args, void *udata)
     if (nr == __NR_clone && a1) {
         clone_fn = safe_read_user_ptr(a1);
         if (!clone_fn) clone_fn = safe_read_user_ptr(a1 + 8);
-        //这里接下来应该配合APK侧进行maps解析
     }
 
     {
