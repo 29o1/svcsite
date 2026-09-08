@@ -2,29 +2,23 @@
 
 [English](README.md) | 简体中文
 
-面向 Agent 的 Android ARM64 syscall 追踪与调用点分析 CLI。
+在命令行中追踪 Android ARM64 syscall 并分析调用点。
 
-svcsite 通过 ADB 和 KernelPatch Module（KPM）采集 Android 进程的有界
-syscall 证据，并将运行时地址解析为模块与偏移，供 IDA、Ghidra 等静态分析
-工具使用。
-
-## 核心能力
-
-- 按包名或精确 PID 限定目标。
-- 记录 syscall 参数、PC、LR 和最多 16 层 ARM64 返回地址。
-- 返回有界事件、调用点排行、计数和证据质量。
-- 提供确定性 JSON、稳定错误码和绝对产物路径。
+svcsite 通过 ADB 和 KernelPatch Module（KPM）记录 syscall 参数、PC、LR
+和最多 16 层返回地址，解析为映射模块及偏移。
+JSON 输出便于脚本和 AI Agent 集成。
 
 ## 环境要求
 
 - macOS、Python 3.11+ 和 ADB
-- 具备 root、KernelPatch 和 `kpatch` 的 Android ARM64 设备
-- KernelPatch SuperKey
-- 构建 KPM 时使用 Android NDK r29+
+- 具备 root、KernelPatch、`kpatch` 和 SuperKey 的 Android ARM64 设备
+- `make` 和 Android NDK（构建已在 r29 上验证）
 
 当前验证基线为 Pixel 6、Android 14 和 arm64-v8a。
 
-## 安装
+## 安装与构建
+
+将下面的 `NDK_DIR` 替换为已安装的 NDK 目录：
 
 ```bash
 git clone --recurse-submodules https://github.com/29o1/svcsite.git
@@ -32,94 +26,70 @@ cd svcsite
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
+make kpm NDK_DIR="/absolute/path/to/android-ndk-r29"
 ```
 
-Agent 调用说明见 [`SKILL.md`](SKILL.md)。使用前确保 `svcsite` 位于 `PATH`。
+构建产物为 `kpm/svcsite.kpm`。运行 `svcsite` 时保持虚拟环境处于激活状态。
 
 ## SuperKey
 
-将 SuperKey 保存到权限为 `0600` 的文件：
+将 SuperKey 作为单行文本保存到权限为 `0600` 的文件。以下准备命令保留已有内容：
 
 ```bash
 mkdir -p ~/.config/svcsite
-install -m 600 /dev/null ~/.config/svcsite/superkey
+(umask 077 && touch ~/.config/svcsite/superkey)
+chmod 600 ~/.config/svcsite/superkey
 ${EDITOR:-vi} ~/.config/svcsite/superkey
 ```
 
-CLI 也支持 `SVCSITE_SUPERKEY_FILE` 和 `SVCSITE_SUPERKEY`，不会将密钥写入
-命令输出、日志或采集产物。
+可用 `--key-file` 指定其他文件。密钥不会写入命令输出、日志或采集产物。
 
-## Agent 工作流
+## 快速开始
 
-Agent 调用统一传入 `--json`。stdout 只输出一个 JSON 对象，诊断信息写入
-stderr；失败时返回稳定错误码和非零退出码。
-
-检查环境和模块状态：
+在仓库根目录执行。将 `SERIAL` 替换为 `adb devices` 显示的序列号，
+将 `io.example.target` 替换为应用包名。检查环境后采集 15 秒，期间操作目标应用：
 
 ```bash
 svcsite doctor --device SERIAL --json
-svcsite status --device SERIAL --json
+svcsite capture --device SERIAL --package io.example.target \
+  --target-mode launch --duration 15 --output ./captures \
+  --kpm "$PWD/kpm/svcsite.kpm" --json
 ```
-
-执行一次有界采集：
-
-```bash
-svcsite capture \
-  --device SERIAL \
-  --package io.example.target \
-  --target-mode launch \
-  --duration 15 \
-  --output ./captures \
-  --kpm ./kpm/svcsite.kpm \
-  --json
-```
-
-`--package` 和 `--pid` 必须指定一个。包名目标支持 `attach`、`launch` 和
-`restart`；PID 目标使用精确 TGID 过滤和 `attach` 模式。
 
 首次加载或更新时传入 `--kpm`。svcsite 比较 SHA-256，设备模块一致时跳过
 安装。
 
-离线查询已保存的 session：
+从采集结果的 `data.session` 复制路径，离线查询：
 
 ```bash
-svcsite query /absolute/path/to/captures/SESSION_ID \
-  --syscall openat,read \
-  --contains /proc/ \
-  --limit 20 \
-  --json
+SESSION='/absolute/path/to/captures/SESSION_ID'
+svcsite query "$SESSION" --limit 20 --json
 ```
 
-`query` 一次返回 `events`、调用点排行 `callsites`、`counts` 和 `quality`。
-`--limit` 同时限制两个列表。可使用 `--pid`、`--tid`、`--contains` 或
-`--module-id` 聚焦证据。
+查询结果的 `data` 包含 `events`、调用点排行 `callsites`、`counts` 和
+`quality`。`--limit` 默认 20，同时限制两个列表；可通过 `--syscall`、
+`--contains`、`--pid`、`--tid` 和 `--module-id` 过滤。
 
-正常完成的 capture 会关闭监控并排空事件缓冲区。中断后可安全重试清理命令：
+采集结束自动关闭监控并排空缓冲区。检查状态或在中断后清理：
 
 ```bash
+svcsite status --device SERIAL --json
 svcsite stop --device SERIAL --json
 ```
 
-## Session 与地址
+`--package`（按 UID 过滤，可能包含多个进程）与 `--pid`（精确单进程，
+仅支持 attach）必须二选一。`--target-mode` 支持 `attach`（默认）、
+`launch` 和 `restart`（强制停止后启动）。
 
-每个 session 包含 `manifest.json`、`events.bin` 和 `maps/` 下的进程映射
-快照。映射获取失败会记录 warning，已采集的 syscall 记录仍可查询。
+默认采集 `reverse-basic` 的 16 个 syscall，可用 `--syscall openat,read`
+改选 KPM 支持的 syscall。
 
-原始 LR 和 backtrace 值是 ARM64 返回地址。派生 callsite 会减去 4 字节，
-并以模块偏移表示调用指令。标识具体二进制时使用 `module_id` 或完整映射路径；
-`module` 用于展示。
+## 输出与参考
 
-## 开发
+Session 包含 `manifest.json`、`events.bin` 和 `maps/` 快照。映射获取失败
+不影响 syscall 记录，但可能无法确定模块归属。通过 `quality` 检查事件丢失；
+`--limit` 导致的列表截断仅影响展示。
 
-```bash
-make check
-make kpm
-```
-
-## 安全与许可证
-
-svcsite 仅用于经过授权的安全研究和逆向分析。加载 KPM 会改变设备内核运行状态，
-并可能导致设备崩溃或重启。
-
-KPM 来源和修改边界见 [`UPSTREAM.md`](UPSTREAM.md)。svcsite 采用
-[GNU General Public License v2.0 only](LICENSE)。
+`--json` 输出单个紧凑 JSON 对象，失败时提供稳定的 `error.code` 和非零退出码。
+完整参数见 `svcsite capture --help` 和 `svcsite query --help`；
+Agent 集成与证据解释见 [`SKILL.md`](SKILL.md)。开发检查使用 `make check`。

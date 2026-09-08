@@ -2,29 +2,23 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Android ARM64 syscall tracing and callsite analysis CLI for agents.
+Android ARM64 syscall tracing and callsite analysis from the command line.
 
-svcsite captures bounded syscall evidence from Android processes through ADB
-and a KernelPatch Module (KPM). It resolves runtime addresses to mapped modules
-and offsets for use in IDA, Ghidra, and other static analysis tools.
-
-## Features
-
-- Target one package or exact PID.
-- Record syscall arguments, PC, LR, and up to 16 ARM64 return addresses.
-- Return bounded events, ranked callsites, counts, and evidence quality.
-- Provide deterministic JSON, stable error codes, and absolute artifact paths.
+svcsite uses ADB and a KernelPatch Module (KPM) to record syscall arguments,
+PC, LR, and up to 16 return addresses. It resolves addresses to mapped modules
+and offsets, with JSON output for scripts and AI agents.
 
 ## Requirements
 
 - macOS, Python 3.11+, and ADB
-- Rooted Android ARM64 device with KernelPatch and `kpatch`
-- KernelPatch SuperKey
-- Android NDK r29+ to build the KPM
+- Rooted Android ARM64 device with KernelPatch, `kpatch`, and a SuperKey
+- `make` and Android NDK (build tested with r29)
 
 Validated on a Pixel 6 running Android 14 on arm64-v8a.
 
-## Installation
+## Installation and build
+
+Replace `NDK_DIR` below with your installed NDK directory:
 
 ```bash
 git clone --recurse-submodules https://github.com/29o1/svcsite.git
@@ -32,100 +26,76 @@ cd svcsite
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
+make kpm NDK_DIR="/absolute/path/to/android-ndk-r29"
 ```
 
-Agent guidance is available in [`SKILL.md`](SKILL.md). Ensure `svcsite` is on
-`PATH` before use.
+The build produces `kpm/svcsite.kpm`. Keep the virtual environment active
+when running `svcsite`.
 
 ## SuperKey
 
-Store the SuperKey in a file with `0600` permissions:
+Save the SuperKey as a single line in a `0600` file. These preparation
+commands preserve existing contents:
 
 ```bash
 mkdir -p ~/.config/svcsite
-install -m 600 /dev/null ~/.config/svcsite/superkey
+(umask 077 && touch ~/.config/svcsite/superkey)
+chmod 600 ~/.config/svcsite/superkey
 ${EDITOR:-vi} ~/.config/svcsite/superkey
 ```
 
-The CLI also accepts `SVCSITE_SUPERKEY_FILE` or `SVCSITE_SUPERKEY`. It keeps
-the key out of command output, logs, and capture artifacts.
+Use `--key-file` to select another file. The key is excluded from command
+output, logs, and capture artifacts.
 
-## Agent workflow
+## Quick start
 
-Use `--json` for Agent calls. stdout contains one JSON object, diagnostics go
-to stderr, and failures return stable error codes with non-zero exit statuses.
-
-Check the environment and module state:
+Run from the repository root. Replace `SERIAL` with the serial from
+`adb devices` and `io.example.target` with your app's package name. Check the
+environment, then capture for 15 seconds while interacting with the app:
 
 ```bash
 svcsite doctor --device SERIAL --json
-svcsite status --device SERIAL --json
+svcsite capture --device SERIAL --package io.example.target \
+  --target-mode launch --duration 15 --output ./captures \
+  --kpm "$PWD/kpm/svcsite.kpm" --json
 ```
-
-Run one bounded capture:
-
-```bash
-svcsite capture \
-  --device SERIAL \
-  --package io.example.target \
-  --target-mode launch \
-  --duration 15 \
-  --output ./captures \
-  --kpm ./kpm/svcsite.kpm \
-  --json
-```
-
-Specify exactly one of `--package` and `--pid`. Package targets support
-`attach`, `launch`, and `restart`; PID targets use exact TGID filtering in
-`attach` mode.
 
 Pass `--kpm` for the first load or an update. svcsite compares SHA-256 values
 and skips installation when the device module already matches.
 
-Query the saved session offline:
+Copy `data.session` from the capture result and query it offline:
 
 ```bash
-svcsite query /absolute/path/to/captures/SESSION_ID \
-  --syscall openat,read \
-  --contains /proc/ \
-  --limit 20 \
-  --json
+SESSION='/absolute/path/to/captures/SESSION_ID'
+svcsite query "$SESSION" --limit 20 --json
 ```
 
-`query` returns `events`, ranked `callsites`, `counts`, and `quality` in one
-result. `--limit` bounds both returned lists. Use `--pid`, `--tid`,
-`--contains`, or `--module-id` to narrow the evidence.
+Query returns `events`, ranked `callsites`, `counts`, and `quality` under
+`data`. `--limit` defaults to 20 and bounds both lists. Filters include
+`--syscall`, `--contains`, `--pid`, `--tid`, and `--module-id`.
 
-A completed capture disables monitoring and drains buffered events. After an
-interruption, cleanup is safe to retry:
+A completed capture stops monitoring and drains buffered events. To check
+status or clean up after an interruption:
 
 ```bash
+svcsite status --device SERIAL --json
 svcsite stop --device SERIAL --json
 ```
 
-## Sessions and addresses
+Specify exactly one of `--package` (UID filtering, possibly multiple processes)
+or `--pid` (one exact process, attach only). `--target-mode` supports `attach`
+(default), `launch`, and `restart` (force-stop, then launch).
 
-Each session contains `manifest.json`, `events.bin`, and process map snapshots
-under `maps/`. Mapping failures are recorded as warnings; captured syscall
-records remain queryable.
+Capture defaults to the 16 syscalls in `reverse-basic`. Use
+`--syscall openat,read` to select a different set supported by the KPM.
 
-Raw LR and backtrace values are ARM64 return addresses. Derived callsites
-subtract four bytes and expose the calling instruction as a module offset.
-Use `module_id` or the full mapped path to identify a binary; `module` is a
-display name.
+## Output and references
 
-## Development
+Sessions contain `manifest.json`, `events.bin`, and snapshots under `maps/`.
+Mapping failures leave syscall records usable but may prevent module attribution.
+Check `quality` for event loss; list truncation by `--limit` only affects display.
 
-```bash
-make check
-make kpm
-```
-
-## Safety and license
-
-Use svcsite only for authorized security research and reverse engineering.
-Loading a KPM changes live kernel state and can crash or reboot the device.
-
-The KPM origin and modification boundary are documented in
-[`UPSTREAM.md`](UPSTREAM.md). svcsite is licensed under the
-[GNU General Public License v2.0 only](LICENSE).
+`--json` emits one compact JSON object. Failures include a stable `error.code`
+and a non-zero exit status. See `svcsite capture --help` and
+`svcsite query --help` for options, or [`SKILL.md`](SKILL.md) for AI agent
+integration and evidence interpretation. Run `make check` for host-side checks.
