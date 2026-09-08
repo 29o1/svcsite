@@ -25,3 +25,8 @@ artifacts/
 /captures/
 /bench/
 .svcsite/
+
+# Local Archify architecture artifacts
+/svcsite-architecture.archify.json
+/svcsite-architecture.html
+/svcsite-architecture.visual-check.*
