@@ -4,6 +4,7 @@ from typing import Any, Sequence
 
 from svcsite.constants import KNOWN_SYSCALL_NAMES, KNOWN_SYSCALLS
 from svcsite.hexutil import hex_str
+from svcsite.fds import FdTracker
 from svcsite.errors import EXIT_DATA, EXIT_USAGE, SvcSiteError
 from svcsite.maps import ModuleIndex
 from svcsite.protocol import Event, open_event_stream
@@ -57,6 +58,7 @@ def _matches(
     tid: int | None,
     contains: str | None,
     syscall_names: dict[int, str],
+    fd_provenance: dict[str, Any] | None = None,
 ) -> bool:
     if syscall_numbers and event.nr not in syscall_numbers:
         return False
@@ -71,6 +73,7 @@ def _matches(
                 syscall_names.get(event.nr, f"sys_{event.nr}"),
                 event.comm,
                 event.description,
+                str((fd_provenance or {}).get("resource") or ""),
             )
         ).casefold()
         if needle not in haystack:
@@ -252,6 +255,13 @@ def run_query(
         )
 
     returned: list[Event] = []
+    fd_evidence: list[dict[str, Any] | None] = []
+    configured = manifest.get("capture", {}).get("syscalls", [])
+    if not isinstance(configured, list):
+        configured = []
+    lifecycle_captured = any(isinstance(item, dict) and item.get("nr") == 57 for item in configured)
+    tracker = FdTracker(lifecycle_captured=lifecycle_captured)
+    parser_errors = (0, 0)
     callsite_counts: dict[
         tuple[int, str | None, str | None, str | None, str], dict[str, Any]
     ] = {}
@@ -265,10 +275,17 @@ def run_query(
             total += 1
             if previous_seq is not None:
                 delta = (event.seq - previous_seq) & 0xFFFFFFFF
+                if delta != 1:
+                    tracker.clear()
                 if delta > 1:
                     sequence_gaps += 1
                     sequence_missing += delta - 1
             previous_seq = event.seq
+            current_errors = (stream.skipped_bytes, stream.invalid_records)
+            if current_errors != parser_errors:
+                tracker.clear()
+            parser_errors = current_errors
+            provenance = tracker.observe(event)
             if not _matches(
                 event,
                 syscall_numbers=selected,
@@ -276,6 +293,7 @@ def run_query(
                 tid=tid,
                 contains=contains,
                 syscall_names=by_number,
+                fd_provenance=provenance,
             ):
                 continue
             callsites = (
@@ -295,6 +313,7 @@ def run_query(
             )
             if len(returned) < limit:
                 returned.append(event)
+                fd_evidence.append(provenance)
         parser_quality = stream.quality()
 
     filters: dict[str, Any] = {}
@@ -312,6 +331,8 @@ def run_query(
     event_payloads = [
         _event_payload(event, by_number, module_index) for event in returned
     ]
+    for payload, provenance in zip(event_payloads, fd_evidence):
+        payload["fd_provenance"] = provenance
     ranked_callsites = _sorted_callsites(callsite_counts)
     returned_callsites = ranked_callsites[:limit]
     summary = manifest.get("summary")

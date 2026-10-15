@@ -118,6 +118,10 @@ class GoldenSchemaTests(unittest.TestCase):
                 sorted(
                     (
                         "seq",
+                        "monotonic_ns",
+                        "phase",
+                        "entry_seq",
+                        "fd_provenance",
                         "syscall",
                         "process",
                         "registers",
