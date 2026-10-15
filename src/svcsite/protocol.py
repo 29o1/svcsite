@@ -47,15 +47,36 @@ class Event:
     backtrace: tuple[int, ...]
     comm: str
     description: str
+    flags: int = 0
+    entry_seq: int = 0
+    monotonic_ns: int | None = None
 
     @property
-    def ret(self) -> int:
-        return _signed_u64(self.ret_raw)
+    def ret(self) -> int | None:
+        return _signed_u64(self.ret_raw) if self.return_valid else None
+
+    @property
+    def return_valid(self) -> bool:
+        if self.flags:
+            return self.flags == 2
+        # Historical writers emitted read at return, and clone at both phases.
+        return self.nr == 63 or (
+            self.nr in (220, 435) and self.description.startswith("new_tid=")
+        )
+
+    @property
+    def phase(self) -> str:
+        if self.return_valid:
+            return "exit"
+        return "entry" if self.flags == 1 else "unknown"
 
     def to_dict(self, syscall_names: Mapping[int, str] | None = None) -> dict[str, Any]:
         name = syscall_names.get(self.nr) if syscall_names else None
         return {
             "seq": self.seq,
+            "monotonic_ns": self.monotonic_ns,
+            "phase": self.phase,
+            "entry_seq": self.entry_seq if self.flags == 2 and self.entry_seq else None,
             "syscall": {"nr": self.nr, "name": name or f"sys_{self.nr}"},
             "process": {
                 "pid": self.tgid,
@@ -72,6 +93,7 @@ class Event:
                 "args": [hex_str(value) for value in self.arguments],
                 "ret": self.ret,
                 "ret_hex": hex_str(self.ret_raw),
+                "ret_valid": self.return_valid,
             },
             "backtrace": [hex_str(value) for value in self.backtrace],
             "description": self.description,
@@ -130,9 +152,11 @@ class EventStream(Iterator[Event]):
             values = fixed_record.unpack_from(data, self._offset)
             comm_index = 23 + max_backtrace
             description_length = values[comm_index + 1]
+            extension_flags = values[comm_index + 2] if version == 2 else 0
+            timestamp_size = 8 if extension_flags & 1 else 0
             if (
                 description_length > MAX_DESCRIPTION_SIZE
-                or fixed_record_size + description_length > record_length
+                or fixed_record_size + description_length + timestamp_size > record_length
             ):
                 self.invalid_records += 1
                 self._offset += 1
@@ -163,6 +187,12 @@ class EventStream(Iterator[Event]):
                 backtrace=tuple(values[23 : 23 + bt_depth]),
                 comm=comm,
                 description=description,
+                flags=values[2] if values[1] == 2 else 0,
+                entry_seq=values[22] if values[1] == 2 else 0,
+                monotonic_ns=(
+                    struct.unpack_from("<Q", data, desc_start + description_length)[0]
+                    if timestamp_size else None
+                ),
             )
             self._offset += record_length
             self.events += 1
