@@ -2,100 +2,121 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Android ARM64 syscall tracing and callsite analysis from the command line.
+An Android ARM64 syscall tracer and callsite analysis tool built on KernelPatch and ADB.
+Designed for automation scripts and AI agents, providing deterministic, zero-symbol-dependency kernel-level dynamic observation with strict JSON outputs.
 
-svcsite uses ADB and a KernelPatch Module (KPM) to record syscall arguments,
-PC, LR, and up to 16 return addresses. It resolves addresses to mapped modules
-and offsets, with JSON output for scripts and AI agents.
+### Key Features
 
-## Requirements
+- **Kernel-Level Interception**: Hooks ARM64 syscalls inside the kernel via KernelPatch (KPM), requiring no app recompilation, ptrace attachment, or userspace runtime tampering.
+- **Deep Callsite Attribution**: Records syscall arguments, real return values (via return hooks), truncated I/O previews, and up to 16 return addresses from the frame pointer (FP) backtrace.
+- **Module & Offset Resolution**: Correlates runtime `/proc/<pid>/maps` snapshots to resolve raw addresses to shared libraries and relative offsets (e.g., `libnative.so+0x1a2b4`).
+- **Offline Session Query**: Query saved captures offline with ranked callsite counts, cross-event file descriptor provenance (tracking paths and socket endpoints), and drop detection.
+- **Targeted Syscall Selection**: Starts with 16 basic syscalls by default; custom lists can be specified for anti-debugging, network, or device fingerprinting analysis.
 
-- macOS, Python 3.11+, and ADB
-- Rooted Android ARM64 device with KernelPatch, `kpatch`, and a SuperKey
-- `make` and Android NDK (build tested with r29)
+> For scenario recipes and evidence boundaries, see [SKILL.md](SKILL.md).
 
-Validated on a Pixel 6 running Android 14 on arm64-v8a.
+---
 
-## Installation and build
+## Prerequisites & Setup
 
-Replace `NDK_DIR` below with your installed NDK directory:
+### Requirements
+- **Host**: macOS, Python 3.11+, ADB, Android NDK (r29 recommended).
+- **Device**: Rooted Android ARM64 device (tested on Pixel 6 / Android 14) with KernelPatch (`kpatch`) installed.
 
+### 1. Install & Build
 ```bash
 git clone --recurse-submodules https://github.com/29o1/svcsite.git
 cd svcsite
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
-make kpm NDK_DIR="/absolute/path/to/android-ndk-r29"
+pip install -e .
+
+# Build the kernel module (svcsite.kpm)
+make kpm NDK_DIR="/path/to/android-ndk-r29"
 ```
 
-The build produces `kpm/svcsite.kpm`. Keep the virtual environment active
-when running `svcsite`.
-
-## SuperKey
-
-Save the SuperKey as a single line in a `0600` file. These preparation
-commands preserve existing contents:
-
+### 2. Configure SuperKey
+Save your KernelPatch SuperKey with `0600` permissions (svcsite guarantees the key is never leaked into stdout, logs, or capture artifacts):
 ```bash
 mkdir -p ~/.config/svcsite
-(umask 077 && touch ~/.config/svcsite/superkey)
+echo "YOUR_SUPERKEY" > ~/.config/svcsite/superkey
 chmod 600 ~/.config/svcsite/superkey
-${EDITOR:-vi} ~/.config/svcsite/superkey
 ```
 
-Use `--key-file` to select another file. The key is excluded from command
-output, logs, and capture artifacts.
+---
 
-## Quick start
+## Quick Start
 
-Run from the repository root. Replace `SERIAL` with the serial from
-`adb devices` and `io.example.target` with your app's package name. Check the
-environment, then capture for 15 seconds while interacting with the app:
-
+### Step 1: Preflight Check
+Verify ADB, root, `kpatch`, and SuperKey connectivity:
 ```bash
 svcsite doctor --device SERIAL --json
-svcsite capture --device SERIAL --package io.example.target \
-  --target-mode launch --duration 15 --output ./captures \
-  --kpm "$PWD/kpm/svcsite.kpm" --json
 ```
 
-Pass `--kpm` for the first load or an update. svcsite compares SHA-256 values
-and skips installation when the device module already matches.
-
-Copy `data.session` from the capture result and query it offline:
-
+### Step 2: Run a Bounded Capture
+Start a timed capture while interacting with the target app (monitoring stops and kernel buffers drain automatically when complete):
 ```bash
-SESSION='/absolute/path/to/captures/SESSION_ID'
-svcsite query "$SESSION" --limit 20 --json
+# Example: Launch target app and record for 15 seconds
+svcsite capture --device SERIAL \
+  --package com.example.app \
+  --target-mode launch \
+  --duration 15 \
+  --kpm "$PWD/kpm/svcsite.kpm" \
+  --output ./captures \
+  --json
 ```
 
-Query returns `events`, ranked `callsites`, `counts`, and `quality` under
-`data`. `--limit` defaults to 20 and bounds both lists. Filters include
-`--syscall`, `--contains`, `--pid`, `--tid`, and `--module-id`.
+**Common Options**:
+- **Target Selection**: `--package` tracks all processes under the app UID; for a single process, use `--pid <PID> --target-mode attach`.
+- **Target Lifecycle**: `--target-mode` supports `launch` (cold start), `restart` (force-stop then launch), and `attach` (attach to existing process).
+- **Syscall Selection**: Omitting `--syscall` monitors the 16 default calls; specifying `--syscall` overrides the set.
+- **Module Deployment**: `--kpm` pushes and loads the module; it automatically skips re-installation if the on-device SHA-256 matches.
 
-A completed capture stops monitoring and drains buffered events. To check
-status or clean up after an interruption:
-
+### Step 3: Offline Analysis
+Take `data.session` from the capture output and query it offline without needing the device:
 ```bash
+svcsite query /path/to/captures/SESSION_ID --limit 20 --json
+```
+
+#### Sample Query Output
+```json
+{
+  "status": "ok",
+  "data": {
+    "callsites": [
+      {
+        "module": "libnative.so",
+        "module_offset": "0x1a2b4",
+        "path": "/data/app/.../libnative.so",
+        "syscall": { "name": "openat", "nr": 56 },
+        "count": 12
+      }
+    ],
+    "quality": {
+      "dropped_events": 0,
+      "status": "clean"
+    }
+  }
+}
+```
+
+---
+
+## Maintenance & Recovery
+
+If a capture is interrupted unexpectedly, inspect or reset the device monitoring state:
+```bash
+# Check monitor status and buffered events count
 svcsite status --device SERIAL --json
+
+# Force stop monitoring and flush kernel buffer
 svcsite stop --device SERIAL --json
 ```
 
-Specify exactly one of `--package` (UID filtering, possibly multiple processes)
-or `--pid` (one exact process, attach only). `--target-mode` supports `attach`
-(default), `launch`, and `restart` (force-stop, then launch).
+---
 
-Capture defaults to the 16 syscalls in `reverse-basic`. Use
-`--syscall openat,read` to select a different set supported by the KPM.
+## References & Development
 
-## Output and references
-
-Sessions contain `manifest.json`, `events.bin`, and snapshots under `maps/`.
-Mapping failures leave syscall records usable but may prevent module attribution.
-Check `quality` for event loss; list truncation by `--limit` only affects display.
-
-`--json` emits one compact JSON object. Failures include a stable `error.code`
-and a non-zero exit status. See `svcsite capture --help` and
-`svcsite query --help` for options, or [`SKILL.md`](SKILL.md) for AI agent
-integration and evidence interpretation. Run `make check` for host-side checks.
+- **Agent Integration Contract**: See [`AGENTS.md`](AGENTS.md)
+- **Scenario Recipes & Boundaries**: See [`SKILL.md`](SKILL.md)
+- **Unit Tests**: Run `make check`

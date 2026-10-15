@@ -50,7 +50,7 @@ LLM.
 - Treat `module` as a display name only. Use `module_id` or the full `path`
   when comparing mappings because unrelated APKs and libraries can share a
   basename.
-- Custom syscall selection is restricted to KPM Tier1/Tier2 hooks with a
+- Custom syscall selection is restricted to the KPM static hook table with a
   statically declared arity; handle `SYSCALL_UNSUPPORTED` rather than retrying
   arbitrary syscall numbers.
 - Bench is development tooling outside the main Agent CLI.
