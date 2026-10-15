@@ -64,7 +64,7 @@ def summarize_event_file(
     path: str | Path,
     syscall_names: Mapping[int, str],
     *,
-    kernel_dropped: int,
+    kernel_dropped: int | None,
 ) -> tuple[dict[str, Any], set[int]]:
     by_syscall: Counter[str] = Counter()
     by_pid: Counter[str] = Counter()

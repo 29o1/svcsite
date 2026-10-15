@@ -99,10 +99,12 @@ def capture_maps_snapshot(
     warnings: list[dict[str, Any]],
     only_pids: Iterable[int] | None = None,
     wait_seconds: float = 0.0,
+    exclude_pids: Iterable[int] = (),
 ) -> set[int]:
     import time
 
-    wanted = set(only_pids) if only_pids is not None else None
+    excluded = set(exclude_pids)
+    wanted = set(only_pids) - excluded if only_pids is not None else None
     deadline = time.monotonic() + wait_seconds
     processes: list[ProcessInfo] = []
     process_lookup_failed = False
@@ -138,8 +140,20 @@ def capture_maps_snapshot(
         return set()
     captured_pids: set[int] = set()
     for process in processes:
+        if process.pid in excluded:
+            continue
         try:
             raw = adb.read_process_maps(process.pid)
+            if not raw.strip():
+                warnings.append(
+                    {
+                        "code": "MAPS_EMPTY",
+                        "phase": snapshot_id,
+                        "pid": process.pid,
+                        "evidence_valid": True,
+                    }
+                )
+                continue
             raw_path = (maps_dir / f"{snapshot_id}-{process.pid}.maps").resolve()
             raw_path.write_text(raw, encoding="utf-8")
         except SvcSiteError as exc:
@@ -281,7 +295,7 @@ class ModuleIndex:
         """Build an index from raw maps/ snapshots ({snapshot}-{pid}.maps).
 
         Filenames sort alphabetically into capture order (post-launch,
-        pre-stop, recovery), matching the legacy modules.json layout.
+        post-launch-poll-N, pre-stop, recovery), as in legacy modules.json.
         """
 
         maps_dir = session_dir / "maps"

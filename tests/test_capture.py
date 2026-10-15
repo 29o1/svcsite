@@ -88,15 +88,15 @@ class CaptureSelectionTests(unittest.TestCase):
         self.assertEqual(numbers, [56, 64])
         self.assertEqual(names[64], "write")
 
-    def test_rejects_module_older_than_1_5(self) -> None:
+    def test_rejects_module_older_than_1_8(self) -> None:
         with self.assertRaises(SvcSiteError) as context:
-            _require_module_version({"version": "1.4.0"})
+            _require_module_version({"version": "1.7.0"})
 
         self.assertEqual(context.exception.code, "MODULE_VERSION_UNSUPPORTED")
         self.assertIn("--kpm", context.exception.message)
 
-    def test_accepts_module_1_5_and_newer(self) -> None:
-        _require_module_version({"version": "1.5.0"})
+    def test_accepts_module_1_8_and_newer(self) -> None:
+        _require_module_version({"version": "1.8.0"})
         _require_module_version({"version": "2.0.1"})
 
     def test_unparseable_version_counts_as_too_old(self) -> None:

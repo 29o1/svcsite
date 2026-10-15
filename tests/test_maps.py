@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock
 import weakref
 
 from svcsite.adb import ProcessInfo
@@ -78,6 +79,20 @@ class ProcMapsTests(unittest.TestCase):
         self.assertEqual(captured, {123})
         self.assertEqual(raw, MAPS_TEXT)
         self.assertEqual(warnings, [])
+
+    def test_empty_snapshot_is_not_counted_as_mapped(self) -> None:
+        adb = Mock()
+        adb.processes_for_uid.return_value = [ProcessInfo(123, 10300, "io.target")]
+        adb.read_process_maps.return_value = ""
+        with tempfile.TemporaryDirectory() as directory:
+            warnings = []
+            captured = capture_maps_snapshot(
+                adb, uid=10300, maps_dir=Path(directory),
+                snapshot_id="poll", warnings=warnings,
+            )
+            self.assertEqual(captured, set())
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            self.assertEqual(warnings[0]["code"], "MAPS_EMPTY")
 
     def test_parses_module_and_anonymous_mapping(self) -> None:
         mappings = parse_proc_maps(MAPS_TEXT)

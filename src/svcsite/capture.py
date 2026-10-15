@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Recovery boundaries retain errors until cleanup and artifact saving finish.
+# ruff: noqa: BLE001
+
 from dataclasses import dataclass
 import re
 import time
@@ -16,7 +19,7 @@ from svcsite.constants import (
     SESSION_SCHEMA,
     SUPPORTED_SYSCALL_NUMBERS,
 )
-from svcsite.errors import EXIT_KPM, EXIT_USAGE, SvcSiteError
+from svcsite.errors import EXIT_DATA, EXIT_INTERNAL, EXIT_KPM, EXIT_USAGE, SvcSiteError
 from svcsite.kpm import KpmController, require_root
 from svcsite.maps import capture_maps_snapshot
 from svcsite.session import (
@@ -55,13 +58,13 @@ def _module_version(status: dict[str, Any]) -> tuple[int, int]:
 
 
 def _require_module_version(status: dict[str, Any]) -> None:
-    if _module_version(status) < (1, 5):
+    if _module_version(status) < (1, 8):
         version = str(status.get("version", ""))
         raise SvcSiteError(
             "MODULE_VERSION_UNSUPPORTED",
             "loaded KPM is too old for this CLI; converge the module with --kpm",
             EXIT_KPM,
-            {"loaded_version": version or None, "required_version": "1.5.0"},
+            {"loaded_version": version or None, "required_version": "1.8.0"},
         )
 
 
@@ -144,7 +147,26 @@ def _wait_for_drain(
     last_status: dict[str, Any] = {}
     while time.monotonic() < deadline:
         last_status = controller.status()
-        if int(last_status.get("events_buffered", 0)) == 0:
+        buffered = last_status.get("events_buffered")
+        if (
+            type(last_status.get("enabled")) is not bool
+            or type(buffered) is not int
+            or buffered < 0
+        ):
+            raise SvcSiteError(
+                "KPM_STATUS_INVALID",
+                "KPM status must report enabled and a non-negative events_buffered",
+                EXIT_KPM,
+                {"status": last_status},
+            )
+        if last_status["enabled"]:
+            raise SvcSiteError(
+                "KPM_MONITORING_ENABLED",
+                "KPM monitoring remained enabled after stop",
+                EXIT_KPM,
+                {"status": last_status},
+            )
+        if buffered == 0:
             time.sleep(0.25)
             return last_status
         time.sleep(0.1)
@@ -155,6 +177,7 @@ def _wait_for_drain(
         {
             "timeout_seconds": timeout,
             "events_buffered": last_status.get("events_buffered"),
+            "status": last_status,
         },
     )
 
@@ -220,9 +243,28 @@ def _select_syscalls(
     return selected, by_number
 
 
-def _shell_value(adb: AdbClient, command: str) -> str:
-    result = adb.shell(f"{command}\n")
-    return result.stdout.strip() if result.returncode == 0 else ""
+def _shell_value(
+    adb: AdbClient,
+    command: str,
+    field: str,
+    warnings: list[dict[str, Any]],
+) -> str:
+    try:
+        result = adb.shell(f"{command}\n")
+        if result.returncode == 0:
+            return result.stdout.strip()
+        code = "DEVICE_METADATA_FAILED"
+    except SvcSiteError as exc:
+        code = exc.code
+    warnings.append(
+        {
+            "code": code,
+            "phase": "device-metadata",
+            "field": field,
+            "evidence_valid": True,
+        }
+    )
+    return ""
 
 
 def _compact_warnings(
@@ -293,12 +335,45 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     started_at = utc_now()
     monotonic_start = time.monotonic()
     monitoring_started = False
-    final_status = initial_status
+    final_status: dict[str, Any] | None = None
+    events_reset = False
+    summary: dict[str, Any] = {}
+    observed_pids: set[int] = set()
+    events_artifact: dict[str, Any] | None = None
+    failures: list[dict[str, str]] = []
+    error: SvcSiteError | None = None
 
+    def record_failure(exc: Exception | KeyboardInterrupt, phase: str) -> None:
+        nonlocal error
+        if isinstance(exc, SvcSiteError):
+            failure = exc
+        elif isinstance(exc, KeyboardInterrupt):
+            failure = SvcSiteError("INTERRUPTED", "capture was interrupted", 130)
+        elif isinstance(exc, OSError):
+            failure = SvcSiteError(
+                "CAPTURE_IO_FAILED", "capture artifact I/O failed", EXIT_DATA
+            )
+        else:
+            failure = SvcSiteError(
+                "INTERNAL_ERROR",
+                "unexpected capture error",
+                EXIT_INTERNAL,
+                {"exception": type(exc).__name__},
+            )
+        if error is None:
+            error = failure
+        # Persist codes and phases, never arbitrary exception text or device output.
+        failures.append({"code": failure.code, "phase": phase})
+
+    phase = "initial-stop"
     try:
         controller.stop()
-        _wait_for_drain(controller, options.timeout)
+        phase = "initial-drain"
+        final_status = _wait_for_drain(controller, options.timeout)
+        phase = "reset-events"
         adb.truncate_root_file(EVENT_PATH)
+        events_reset = True
+        phase = "configure"
         controller.clear()
         controller.set_uid(uid)
         if target_kind == "pid":
@@ -314,21 +389,27 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
 
         package = target.get("package")
         if options.target_mode == "restart" and isinstance(package, str):
+            phase = "target-stop"
             adb.force_stop(package)
 
+        phase = "monitor-start"
         monitoring_started = True
         controller.start()
         if options.target_mode in {"launch", "restart"} and isinstance(package, str):
+            phase = "target-launch"
             launch_result = adb.launch_package(package)
-        elif isinstance(package, str) and not adb.package_pids(package):
-            warnings.append(
-                {
-                    "code": "TARGET_NOT_RUNNING",
-                    "phase": "capture-start",
-                    "evidence_valid": True,
-                }
-            )
+        elif isinstance(package, str):
+            phase = "target-lookup"
+            if not adb.package_pids(package):
+                warnings.append(
+                    {
+                        "code": "TARGET_NOT_RUNNING",
+                        "phase": "capture-start",
+                        "evidence_valid": True,
+                    }
+                )
 
+        phase = "post-launch-maps"
         mapped_pid_set.update(
             capture_maps_snapshot(
                 adb,
@@ -344,8 +425,38 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         )
         maps_snapshot_count += 1
 
+        phase = "capture"
         try:
-            time.sleep(options.duration)
+            deadline = time.monotonic() + options.duration
+            poll = 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.5, remaining))
+                if time.monotonic() >= deadline:
+                    break
+                # PID capture has no additional processes to discover.
+                if target_kind == "pid":
+                    continue
+                poll += 1
+                previous_timeout = adb.timeout
+                try:
+                    # Bound each optional probe below the normal CLI timeout.
+                    adb.timeout = min(previous_timeout, 2.0)
+                    mapped_pid_set.update(
+                        capture_maps_snapshot(
+                            adb,
+                            uid=uid,
+                            maps_dir=maps_dir,
+                            snapshot_id=f"post-launch-poll-{poll:06d}",
+                            warnings=warnings,
+                            exclude_pids=mapped_pid_set,
+                        )
+                    )
+                    maps_snapshot_count += 1
+                finally:
+                    adb.timeout = previous_timeout
         except KeyboardInterrupt:
             warnings.append(
                 {
@@ -354,6 +465,7 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
                     "evidence_valid": True,
                 }
             )
+        phase = "pre-stop-maps"
         mapped_pid_set.update(
             capture_maps_snapshot(
                 adb,
@@ -365,34 +477,90 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
             )
         )
         maps_snapshot_count += 1
-    finally:
-        if monitoring_started:
-            controller.stop()
-            final_status = _wait_for_drain(controller, options.timeout)
+    except (Exception, KeyboardInterrupt) as exc:
+        record_failure(exc, phase)
 
-    adb.make_root_file_readable(EVENT_PATH)
-    adb.pull(EVENT_PATH, events_path)
-    summary, observed_pids = summarize_event_file(
-        events_path,
-        syscall_names,
-        kernel_dropped=int(final_status.get("events_dropped", 0)),
-    )
+    if monitoring_started:
+        final_status = None
+        phase = "final-stop"
+        try:
+            controller.stop()
+            phase = "final-drain"
+            final_status = _wait_for_drain(controller, options.timeout)
+        except (Exception, KeyboardInterrupt) as exc:
+            record_failure(exc, phase)
+
+    if error is not None:
+        # A failed stop/drain must not leave the initial status labeled as final.
+        try:
+            final_status = controller.status()
+        except (Exception, KeyboardInterrupt) as exc:
+            final_status = None
+            record_failure(exc, "final-status")
+
+    if events_reset:
+        phase = "events-readable"
+        try:
+            adb.make_root_file_readable(EVENT_PATH)
+            phase = "events-pull"
+            adb.pull(EVENT_PATH, events_path)
+        except (Exception, KeyboardInterrupt) as exc:
+            record_failure(exc, phase)
+        # A failed pull may still leave a useful partial file.
+        phase = "events-summary"
+        try:
+            if not events_path.is_file():
+                raise SvcSiteError(
+                    "EVENTS_NOT_FOUND", "capture events were not saved", EXIT_DATA
+                )
+            events_artifact = {"path": str(events_path)}
+            summary, observed_pids = summarize_event_file(
+                events_path,
+                syscall_names,
+                kernel_dropped=(
+                    final_status.get("events_dropped") if final_status else None
+                ),
+            )
+            phase = "events-fingerprint"
+            events_artifact.update(
+                size=events_path.stat().st_size,
+                sha256=sha256_file(events_path),
+            )
+        except (Exception, KeyboardInterrupt) as exc:
+            record_failure(exc, phase)
+
+    target_pids = sorted(observed_pids)
+    missing_pids = observed_pids - mapped_pid_set
+    if missing_pids:
+        try:
+            mapped_pid_set.update(
+                capture_maps_snapshot(
+                    adb,
+                    uid=uid,
+                    maps_dir=maps_dir,
+                    snapshot_id="recovery",
+                    warnings=warnings,
+                    only_pids=missing_pids,
+                )
+            )
+            maps_snapshot_count += 1
+        except (Exception, KeyboardInterrupt) as exc:
+            record_failure(exc, "recovery-maps")
+
+    device = {"serial": serial}
+    if error is None:
+        try:
+            for field, command in (
+                ("model", "getprop ro.product.model"),
+                ("android_version", "getprop ro.build.version.release"),
+                ("abi", "getprop ro.product.cpu.abi"),
+                ("kernel_release", "uname -r"),
+            ):
+                device[field] = _shell_value(adb, command, field, warnings)
+        except (Exception, KeyboardInterrupt) as exc:
+            record_failure(exc, "device-metadata")
 
     ended_at = utc_now()
-    target_pids = sorted(observed_pids)
-    missing_pids = set(target_pids) - mapped_pid_set
-    if missing_pids:
-        mapped_pid_set.update(
-            capture_maps_snapshot(
-                adb,
-                uid=uid,
-                maps_dir=maps_dir,
-                snapshot_id="recovery",
-                warnings=warnings,
-                only_pids=missing_pids,
-            )
-        )
-        maps_snapshot_count += 1
     mapped_pids = sorted(mapped_pid_set)
     maps_directory = str(maps_dir.resolve()) if maps_dir.is_dir() else None
     selected_syscalls = [
@@ -402,16 +570,16 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
     manifest = {
         "schema_version": SESSION_SCHEMA,
         "session_id": session_dir.name,
+        "status": (
+            "failed" if error else "interrupted"
+            if any(w["code"] == "CAPTURE_INTERRUPTED" for w in warnings)
+            else "complete"
+        ),
+        "failures": failures,
         "started_at": started_at,
         "ended_at": ended_at,
         "duration_seconds": round(time.monotonic() - monotonic_start, 3),
-        "device": {
-            "serial": serial,
-            "model": _shell_value(adb, "getprop ro.product.model"),
-            "android_version": _shell_value(adb, "getprop ro.build.version.release"),
-            "abi": _shell_value(adb, "getprop ro.product.cpu.abi"),
-            "kernel_release": _shell_value(adb, "uname -r"),
-        },
+        "device": device,
         "target": {
             **target,
             "observed_pids": target_pids,
@@ -425,17 +593,14 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         },
         "module": {
             "name": MODULE_NAME,
-            "version": final_status.get("version"),
+            "version": initial_status.get("version"),
+            "initial_status": initial_status,
             "deploy": module_deploy,
             "final_status": final_status,
         },
         "summary": summary,
         "artifacts": {
-            "events": {
-                "path": str(events_path),
-                "size": events_path.stat().st_size,
-                "sha256": sha256_file(events_path),
-            },
+            "events": events_artifact,
             "maps": {
                 "directory": maps_directory,
                 "snapshot_count": maps_snapshot_count,
@@ -444,7 +609,23 @@ def run_capture(options: CaptureOptions) -> dict[str, Any]:
         },
         "warnings": warnings,
     }
-    write_json(manifest_path, manifest)
+    try:
+        write_json(manifest_path, manifest)
+    except (Exception, KeyboardInterrupt) as exc:
+        record_failure(exc, "manifest-write")
+    if error is not None:
+        raise SvcSiteError(
+            error.code,
+            error.message,
+            error.exit_code,
+            {
+                **error.details,
+                "session": str(session_dir),
+                "manifest": str(manifest_path),
+                "failures": failures,
+                "final_status": final_status,
+            },
+        ) from error
 
     return {
         "session_id": session_dir.name,
