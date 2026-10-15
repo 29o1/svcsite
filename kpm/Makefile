@@ -47,7 +47,7 @@ check-env:
 	@test -d "$(KERNEL_DIR)" || (echo "Missing KernelPatch kernel dir: $(KERNEL_DIR)" >&2; exit 1)
 	@test -x "$(CC)" || (echo "Missing Android NDK clang: $(CC)" >&2; exit 1)
 
-$(TARGET): src/svcsite.c
+$(TARGET): src/svcsite.c src/io_preview.h src/hook_table.h
 	$(CC) $(CFLAGS) -c $< -o svcsite.o
 	$(LD) -nostdlib $(LDFLAGS) svcsite.o -o $@
 	rm -f svcsite.o

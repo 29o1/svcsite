@@ -2,6 +2,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from svcsite.adb import CommandResult
 from svcsite.errors import SvcSiteError
@@ -90,6 +91,41 @@ class KpmControllerTests(unittest.TestCase):
 
         self.assertEqual(context.exception.code, "MODULE_NOT_LOADED")
         self.assertIn("--kpm", context.exception.details["hint"])
+
+    def test_hook_configuration_extends_timeout_and_restores_on_failure(self) -> None:
+        for timeout in (15.0, 90.0):
+            for fail in (False, True):
+                with self.subTest(timeout=timeout, fail=fail):
+                    adb = FakeAdb([])
+                    adb.timeout = timeout
+                    controller = KpmController(adb, "test-secret")
+                    def configure(command, timeout=timeout, fail=fail, adb=adb):
+                        self.assertEqual(adb.timeout, max(timeout, 60.0))
+                        self.assertEqual(command, "set_nrs 65,209")
+                        if fail:
+                            raise OSError("fixture failure")
+                        return {"ok": True}
+                    with patch.object(controller, "ctl0", side_effect=configure):
+                        if fail:
+                            with self.assertRaises(OSError):
+                                controller.set_nrs([65, 209])
+                        else:
+                            self.assertTrue(controller.set_nrs([65, 209])["ok"])
+                    self.assertEqual(adb.timeout, timeout)
+
+    def test_configuration_errors_keep_stable_codes_and_failed_syscall(self) -> None:
+        for code in ("KPM_CONTROL_BUSY", "KPM_MONITORING_ENABLED",
+                     "KPM_SYSCALL_SELECTION_INVALID", "SYSCALL_UNSUPPORTED",
+                     "KPM_HOOK_INSTALL_FAILED"):
+            with self.subTest(code=code):
+                adb = FakeAdb([CommandResult(0, '{"ok":false,"code":"'+code+'","nr":65}', "")])
+                controller = KpmController(adb, "test-secret")
+                controller.kpatch_path = "/data/local/tmp/kpatch"
+                with self.assertRaises(SvcSiteError) as error:
+                    controller.set_nrs([65])
+                self.assertEqual(error.exception.code, code)
+                self.assertEqual(error.exception.details, {"syscall_nr": 65})
+                self.assertEqual(adb.timeout, 15.0)
 
     def test_sets_exact_pid_filter(self) -> None:
         adb = FakeAdb([CommandResult(0, '{"ok":true,"target_pid":1687}', "")])

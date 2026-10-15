@@ -307,6 +307,20 @@ class KpmController:
             ) from exc
 
         if payload.get("ok") is not True:
+            messages = {
+                "KPM_CONTROL_BUSY": "another KPM control command is in progress; retry when it completes",
+                "KPM_MONITORING_ENABLED": "stop monitoring before selecting syscall hooks",
+                "KPM_SYSCALL_SELECTION_INVALID": "KPM requires a nonempty comma-separated syscall list",
+                "SYSCALL_UNSUPPORTED": "syscall is outside the KPM static whitelist",
+                "KPM_HOOK_INSTALL_FAILED": "KPM could not install a requested syscall hook",
+            }
+            code = payload.get("code")
+            if isinstance(code, str) and code in messages:
+                details = {}
+                nr = payload.get("nr")
+                if type(nr) is int and 0 <= nr < 512:
+                    details["syscall_nr"] = nr
+                raise SvcSiteError(code, messages[code], EXIT_KPM, details)
             raise SvcSiteError(
                 "KPM_REJECTED",
                 "KPM rejected the command",
@@ -333,7 +347,12 @@ class KpmController:
 
     def set_nrs(self, syscall_numbers: list[int]) -> dict[str, Any]:
         encoded = ",".join(str(number) for number in syscall_numbers)
-        return self.ctl0(f"set_nrs {encoded}")
+        original_timeout = self.adb.timeout
+        self.adb.timeout = max(original_timeout, 60.0)
+        try:
+            return self.ctl0(f"set_nrs {encoded}")
+        finally:
+            self.adb.timeout = original_timeout
 
     def clear(self) -> dict[str, Any]:
         return self.ctl0("clear")

@@ -19,7 +19,7 @@
  *   - read/write/sendto partial data preview (up to DATA_PREVIEW bytes)
  *
  * Architecture:
- *   - Module load → hook all tier1 syscalls → wait disabled
+ *   - Module load → wait disabled → install selected hooks on capture
  *   - CLI controls UID/TGID, syscall NR bitmap, and pause/resume
  *
  * Official KPM API used:
@@ -91,7 +91,7 @@ static unsigned long lookup_symbol_log(const char *name)
     return addr;
 }
 
-#define SVCSITE_KPM_VERSION "1.5.0"
+#define SVCSITE_KPM_VERSION "1.8.1"
 
 KPM_NAME("svcsite");
 KPM_VERSION(SVCSITE_KPM_VERSION);
@@ -255,16 +255,10 @@ static int target_matches(int uid)
     return 1;
 }
 
-/* read(2) needs after-hook to dump user buffer, so we cache entry args by TID */
-#define READ_CTX_SLOTS 2048
-typedef struct {
-    int pid;
-    int tgid;
-    int fd;
-    unsigned long buf;
-    unsigned long count;
-} read_ctx_t;
-static read_ctx_t g_read_ctx[READ_CTX_SLOTS];
+/* A generation prevents a blocked syscall from leaking into a later capture. */
+static unsigned long g_capture_generation = 0;
+#define EVENT_ENTRY 1
+#define EVENT_RETURN 2
 
 /* clone returns new tid; clone_fn (best-effort) is from user wrapper. Cache entry args by TID. */
 #define CLONE_CTX_SLOTS 2048
@@ -281,14 +275,7 @@ static clone_ctx_t g_clone_ctx[CLONE_CTX_SLOTS];
 #define HOOK_INLINE  1
 #define HOOK_FP      2
 
-//每个要 hook 的 syscall 有一个 hook_entry_t 记录它的状态和 hook 方式。
-typedef struct {
-    int nr;
-    int narg;
-    int active;
-    int method;  /* HOOK_INLINE or HOOK_FP */
-} hook_entry_t;
-
+#include "hook_table.h"
 
 /* Event record — expanded for detailed parsing */
 // 参数在内核态解析；原始地址由主机端结合 maps 快照解析。
@@ -308,9 +295,18 @@ typedef struct {
     unsigned int bt_depth;
     unsigned long bt[MAX_BT];
     unsigned long clone_fn;
-    unsigned long ret;         // syscall 返回值（仅部分 after hook 填充）
+    unsigned long ret;
+    unsigned int event_flags;
+    unsigned int entry_seq;
+    unsigned long long monotonic_ns;
     char desc[DESC_BUF_SIZE];  // 解析后的参数描述字符串（核心输出）
 } svc_event_t;
+
+/* ARM64 kernel timespec64 ABI; clocks are resolved once before monitoring. */
+struct svc_timespec64 { long long tv_sec; long long tv_nsec; };
+/* ktime_get returns the signed 64-bit nanosecond ktime_t on ARM64. */
+static long long (*g_ktime_get)(void);
+static void (*g_ktime_get_real_ts64)(struct svc_timespec64 *);
 
 static svc_event_t *g_events = 0; // 环形缓冲区（动态分配）
 static void *(*g_vzalloc)(unsigned long size) = 0;
@@ -436,6 +432,13 @@ static int init_events_storage(void)
     }
     if (!g_syscall_name_table) {
         g_syscall_name_table = (kp_sysname_t *)lookup_symbol_log("syscall_name_table");
+    }
+
+    g_ktime_get = (typeof(g_ktime_get))lookup_symbol_log("ktime_get");
+    g_ktime_get_real_ts64 = (typeof(g_ktime_get_real_ts64))lookup_symbol_log("ktime_get_real_ts64");
+    if (!g_ktime_get || !g_ktime_get_real_ts64) {
+        printk("svcsite: required kernel clocks unavailable\n");
+        return -1;
     }
 
     if (!g_vfree) {
@@ -698,72 +701,7 @@ static int parse_sockaddr(char *buf, int blen, unsigned long uptr, int addrlen)
     return n;
 }
 
-/* ================================================================
- * Data preview — hex dump first N bytes for write/sendto
- * ================================================================ */
-static int data_preview(char *buf, int blen, unsigned long uptr, unsigned long datalen)
-{
-    unsigned char tmp[DATA_PREVIEW];
-    int n = 0;
-    int to_read = (datalen < DATA_PREVIEW) ? (int)datalen : DATA_PREVIEW;
-
-    if (!is_user_addr(uptr) || to_read <= 0)
-        return snprintf(buf, blen, "buf=0x%lx", uptr);
-
-    int got = safe_copy_user_bytes((char *)tmp, uptr, to_read);
-    if (got <= 0)
-        return snprintf(buf, blen, "buf=0x%lx", uptr);
-
-    n += snprintf(buf + n, blen - n, "data[%d/%lu]\n", got, datalen);
-    {
-        int off;
-        for (off = 0; off < got && n < blen - 64; off += 16) {
-            int i;
-            n += snprintf(buf + n, blen - n, "%04x: ", off);
-            for (i = 0; i < 16; i++) {
-                if (off + i < got) n += snprintf(buf + n, blen - n, "%02x ", tmp[off + i]);
-                else n += snprintf(buf + n, blen - n, "   ");
-            }
-            n += snprintf(buf + n, blen - n, " |");
-            for (i = 0; i < 16 && off + i < got && n < blen - 4; i++) {
-                unsigned char c = tmp[off + i];
-                buf[n++] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
-            }
-            buf[n++] = '|';
-            buf[n++] = '\n';
-        }
-        if (n < blen - 32) {
-            int i = 0;
-            int segs = 0;
-            n += snprintf(buf + n, blen - n, "strings=");
-            while (i < got && n < blen - 4) {
-                int j = i;
-                while (j < got) {
-                    unsigned char c = tmp[j];
-                    if (c < 0x20 || c >= 0x7f) break;
-                    j++;
-                }
-                if (j - i >= 4) {
-                    int k;
-                    if (segs > 0) n += snprintf(buf + n, blen - n, " | ");
-                    for (k = i; k < j && n < blen - 2; k++) {
-                        unsigned char c = tmp[k];
-                        if (c == '\\' || c == '"') {
-                            if (n < blen - 2) buf[n++] = '\\';
-                        }
-                        buf[n++] = (char)c;
-                    }
-                    segs++;
-                    if (segs >= 8) break;
-                }
-                i = (j > i) ? j + 1 : i + 1;
-            }
-            buf[n++] = '\n';
-        }
-        if (n > 0 && n < blen) buf[n - 1] = '\0';
-    }
-    return n;
-}
+#include "io_preview.h"
 
 /* ================================================================
  * prctl option name decoder
@@ -1045,6 +983,7 @@ static void describe_args(int nr, unsigned long a0, unsigned long a1,
     case 66: /* writev */
         n = snprintf(desc, dlen, "fd=%d iov=0x%lx iovcnt=%d",
                      (int)a0, a1, (int)a2);
+        n += preview_iov(desc + n, dlen - n, a1, a2, ~0UL);
         break;
 
     /* ===================== PROCESS ===================== */
@@ -1250,6 +1189,7 @@ static void describe_args(int nr, unsigned long a0, unsigned long a1,
     case 211: /* sendmsg */
         n = snprintf(desc, dlen, "sockfd=%d msg=0x%lx flags=0x%lx",
                      (int)a0, a1, a2);
+        n += preview_msg(desc + n, dlen - n, a1, ~0UL, 0, 0);
         break;
 
     case 212: /* recvmsg */
@@ -1385,8 +1325,8 @@ static void describe_args(int nr, unsigned long a0, unsigned long a1,
             unsigned long cmd = a1;
             if (cmd == 0xc0306201UL) iname = "BINDER_WRITE_READ";
             else if (cmd == 0x40046207UL) iname = "BINDER_SET_CONTEXT_MGR";
-            else if (cmd == 0x40046209UL) iname = "BINDER_SET_MAX_THREADS";
-            else if (cmd == 0xc0506210UL) iname = "BINDER_VERSION";
+            else if (cmd == 0x40046205UL) iname = "BINDER_SET_MAX_THREADS";
+            else if (cmd == 0xc0046209UL) iname = "BINDER_VERSION";
             else if (cmd == 0x5401UL) iname = "TCGETS";
             else if (cmd == 0x5402UL) iname = "TCSETS";
             else if (cmd == 0x540eUL) iname = "TIOCSCTTY";
@@ -1688,17 +1628,19 @@ static void describe_args(int nr, unsigned long a0, unsigned long a1,
     (void)n;
 }
 
-static void push_event(int nr, int uid,
+static unsigned int push_event(int nr, int uid,
                        unsigned long a0, unsigned long a1, unsigned long a2,
                        unsigned long a3, unsigned long a4, unsigned long a5,
                        unsigned long pc, unsigned long caller, unsigned long fp, unsigned long sp,
                        unsigned int bt_depth, const unsigned long *bt,
                        unsigned long clone_fn,
                        unsigned long ret,
-                       const char *desc)
+                       const char *desc, unsigned int event_flags, unsigned int entry_seq,
+                       unsigned long long monotonic_ns)
 {
     int idx;
-    if (!g_active || !g_events) return;
+    unsigned int seq;
+    if (!g_active || !g_events) return 0;
 
     ev_lock();
 
@@ -1715,7 +1657,10 @@ static void push_event(int nr, int uid,
     idx = g_ev_head;
     {
         svc_event_t *ev = &g_events[idx];
-        ev->seq = ++g_seq;
+        ev->seq = seq = ++g_seq;
+        ev->event_flags = event_flags;
+        ev->entry_seq = entry_seq;
+        ev->monotonic_ns = monotonic_ns;
         ev->nr = nr;
         ev->tgid = (int)raw_syscall0(__NR_getpid);
         ev->pid = (int)raw_syscall0(__NR_gettid);
@@ -1763,16 +1708,18 @@ static void push_event(int nr, int uid,
         g_ev_dropped++;
     }
     ev_unlock();
+    return seq;
 }
 
 /* ================================================================
  * Generic hook callback (before only)
- * One callback for ALL syscalls, NR passed via udata.
+ * Callbacks receive their statically declared hook entry through udata.
  * ================================================================ */
 static void before_generic(hook_fargs4_t *args, void *udata)
 {
-    int nr = (int)(unsigned long)udata;
-    int uid;
+    hook_entry_t *hook = (hook_entry_t *)udata;
+    int nr = hook->nr;
+    int uid, arity;
     char desc[DESC_BUF_SIZE];
     unsigned long a0, a1, a2, a3, a4, a5;
     unsigned long pc = 0;
@@ -1782,7 +1729,9 @@ static void before_generic(hook_fargs4_t *args, void *udata)
     unsigned long bt[MAX_BT];
     unsigned int bt_depth = 0;
     unsigned long clone_fn = 0;
+    unsigned long long monotonic_ns;
 
+    args->local.data7 = 0;
     /* Fast rejection path */
     if (!g_enabled) return;
     if (nr < 0 || nr >= MAX_NR) return;
@@ -1791,13 +1740,47 @@ static void before_generic(hook_fargs4_t *args, void *udata)
     uid = (int)current_uid();
     if (!target_matches(uid)) return;
 
-    /* Read syscall arguments using official API */
-    a0 = syscall_argn(args, 0);
-    a1 = syscall_argn(args, 1);
-    a2 = syscall_argn(args, 2);
-    a3 = syscall_argn(args, 3);
-    a4 = syscall_argn(args, 4);
-    a5 = syscall_argn(args, 5);
+    monotonic_ns = g_ktime_get();
+
+    /* Never read beyond the arity of a direct (non-pt_regs) hook. */
+    arity = hook->narg;
+    a0 = arity > 0 ? syscall_argn(args, 0) : 0;
+    a1 = arity > 1 ? syscall_argn(args, 1) : 0;
+    a2 = arity > 2 ? syscall_argn(args, 2) : 0;
+
+    a3 = arity > 3 ? syscall_argn(args, 3) : 0;
+    a4 = arity > 4 ? syscall_argn(args, 4) : 0;
+    a5 = arity > 5 ? syscall_argn(args, 5) : 0;
+
+    if (hook->after == (void *)after_generic_ret) {
+        args->local.data0 = a0;
+        args->local.data1 = a1;
+        args->local.data2 = a2;
+        args->local.data3 = a3;
+        args->local.data4 = a4;
+        args->local.data5 = a5;
+        unsigned int capacity = 0;
+        unsigned long lenptr = nr == 207 ? a5 : nr == 209 ? a4 :
+                               (nr == 202 || nr == 242) ? a2 : 0;
+        if (lenptr) safe_copy_user_bytes((char *)&capacity, lenptr, sizeof(capacity));
+        if (nr == 212) {
+            struct svc_msghdr msg;
+            if (safe_copy_user_bytes((char *)&msg, a1, sizeof(msg)) == sizeof(msg))
+                capacity = msg.namelen;
+        }
+        args->local.data6 = (unsigned long)capacity << 32;
+        args->local.data7 = g_capture_generation;
+        /* Preserve the fd at entry without an unwind or reading the output buffer. */
+        if (nr == __NR_read) {
+            struct pt_regs *r = _task_pt_reg(current);
+            snprintf(desc, sizeof(desc), "fd=%d buf=0x%lx count=%lu", (int)a0, a1, a2);
+            args->local.data6 = push_event(nr, uid, a0, a1, a2, a3, a4, a5,
+                                          r ? r->pc : 0, r ? r->regs[30] : 0,
+                                          r ? r->regs[29] : 0, r ? r->sp : 0,
+                                          0, 0, 0, 0, desc, EVENT_ENTRY, 0, monotonic_ns);
+            return;
+        }
+    }
 
     if (nr == __NR_clone && a1) {
         clone_fn = safe_read_user_ptr(a1);
@@ -1828,17 +1811,6 @@ static void before_generic(hook_fargs4_t *args, void *udata)
         }
     }
 
-    if (nr == __NR_read) {
-        unsigned int tid = (unsigned int)raw_syscall0(__NR_gettid);
-        unsigned int tgid = (unsigned int)raw_syscall0(__NR_getpid);
-        unsigned int slot = (tid * 2654435761u) & (READ_CTX_SLOTS - 1);
-        g_read_ctx[slot].pid = (int)tid;
-        g_read_ctx[slot].tgid = (int)tgid;
-        g_read_ctx[slot].fd = (int)a0;
-        g_read_ctx[slot].buf = strip_ptr(a1);
-        g_read_ctx[slot].count = a2;
-        return;
-    }
 
     if (nr == __NR_clone || nr == 435) {
         unsigned int tid = (unsigned int)raw_syscall0(__NR_gettid);
@@ -1851,139 +1823,26 @@ static void before_generic(hook_fargs4_t *args, void *udata)
         g_clone_ctx[slot].clone_fn = strip_ptr(clone_fn);
     }
 
-    push_event(nr, uid, a0, a1, a2, a3, a4, a5, pc, caller, fp, sp, bt_depth, bt, clone_fn, 0, desc);
+    {
+        unsigned int seq = push_event(nr, uid, a0, a1, a2, a3, a4, a5,
+                                      pc, caller, fp, sp, bt_depth, bt, clone_fn, 0,
+                                      desc, EVENT_ENTRY, 0, monotonic_ns);
+        if (hook->after == (void *)after_generic_ret) args->local.data6 |= seq;
+    }
 }
-
-/* ================================================================
- * Tier1: Core syscalls for reverse engineering (46)
- * ================================================================ */
-static hook_entry_t tier1_hooks[] = {
-    { 56, 4, 0, 0 },   /* openat */
-    { 57, 1, 0, 0 },   /* close */
-    { 48, 4, 0, 0 },   /* faccessat */
-    { 35, 3, 0, 0 },   /* unlinkat */
-    { 78, 4, 0, 0 },   /* readlinkat */
-    { 79, 4, 0, 0 },   /* newfstatat */
-    { 80, 2, 0, 0 },   /* fstat */
-    { 61, 3, 0, 0 },   /* getdents64 */
-    { 63, 3, 0, 0 },   /* read */
-    { 64, 3, 0, 0 },   /* write */
-    { 221, 3, 0, 0 },  /* execve */
-    { 220, 5, 0, 0 },  /* clone */
-    { 435, 2, 0, 0 },  /* clone3 */
-    { 93, 1, 0, 0 },   /* exit */
-    { 94, 1, 0, 0 },   /* exit_group */
-    { 222, 6, 0, 0 },  /* mmap */
-    { 226, 3, 0, 0 },  /* mprotect */
-    { 215, 2, 0, 0 },  /* munmap */
-    { 214, 1, 0, 0 },  /* brk */
-    { 232, 3, 0, 0 },  /* mincore */
-    { 198, 3, 0, 0 },  /* socket */
-    { 200, 3, 0, 0 },  /* bind */
-    { 203, 3, 0, 0 },  /* connect */
-    { 206, 6, 0, 0 },  /* sendto */
-    { 207, 6, 0, 0 },  /* recvfrom */
-    { 117, 4, 0, 0 },  /* ptrace */
-    { 167, 5, 0, 0 },  /* prctl */
-    { 129, 2, 0, 0 },  /* kill */
-    { 131, 3, 0, 0 },  /* tgkill */
-    { 134, 4, 0, 0 },  /* rt_sigaction */
-    { 135, 4, 0, 0 },  /* rt_sigprocmask */
-    { 29, 3, 0, 0 },   /* ioctl */
-    { 25, 3, 0, 0 },   /* fcntl */
-    { 277, 3, 0, 0 },  /* seccomp */
-    { 280, 3, 0, 0 },  /* bpf */
-    { 279, 2, 0, 0 },  /* memfd_create */
-    { 146, 1, 0, 0 },  /* setuid */
-    { 144, 1, 0, 0 },  /* setgid */
-    { 147, 3, 0, 0 },  /* setresuid */
-    { 105, 3, 0, 0 },  /* init_module */
-    { 273, 3, 0, 0 },  /* finit_module */
-    { 97, 1, 0, 0 },   /* unshare */
-    { 268, 2, 0, 0 },  /* setns */
-    { 261, 4, 0, 0 },  /* prlimit64 */
-    { 62, 3, 0, 0 },   /* lseek */
-    { 291, 5, 0, 0 },  /* statx */
-};
-#define TIER1_COUNT (sizeof(tier1_hooks) / sizeof(tier1_hooks[0]))
-
-/* ================================================================
- * Tier2: Extended syscalls (24) — loaded on demand
- * ================================================================ */
-static hook_entry_t tier2_hooks[] = {
-    { 40, 5, 0, 0 },   /* mount */
-    { 39, 2, 0, 0 },   /* umount2 */
-    { 281, 5, 0, 0 },  /* execveat */
-    { 270, 5, 0, 0 },  /* process_vm_readv */
-    { 271, 5, 0, 0 },  /* process_vm_writev */
-    { 211, 3, 0, 0 },  /* sendmsg */
-    { 212, 3, 0, 0 },  /* recvmsg */
-    { 208, 5, 0, 0 },  /* setsockopt */
-    { 201, 2, 0, 0 },  /* listen */
-    { 202, 3, 0, 0 },  /* accept */
-    { 242, 4, 0, 0 },  /* accept4 */
-    { 210, 2, 0, 0 },  /* shutdown */
-    { 106, 2, 0, 0 },  /* delete_module */
-    { 34, 3, 0, 0 },   /* mkdirat */
-    { 38, 4, 0, 0 },   /* renameat */
-    { 276, 5, 0, 0 },  /* renameat2 */
-    { 53, 3, 0, 0 },   /* fchmodat */
-    { 54, 5, 0, 0 },   /* fchownat */
-    { 21, 4, 0, 0 },   /* epoll_ctl */
-    { 27, 3, 0, 0 },   /* inotify_add_watch */
-    { 5, 5, 0, 0 },    /* setxattr */
-    { 8, 4, 0, 0 },    /* getxattr */
-    { 233, 3, 0, 0 },  /* madvise */
-    { 98, 6, 0, 0 },   /* futex */
-};
-#define TIER2_COUNT (sizeof(tier2_hooks) / sizeof(tier2_hooks[0]))
 
 static int count_installed_hooks(void)
 {
     int i, count = 0;
-    for (i = 0; i < (int)TIER1_COUNT; i++) {
-        if (tier1_hooks[i].active) count++;
-    }
-    for (i = 0; i < (int)TIER2_COUNT; i++) {
-        if (tier2_hooks[i].active) count++;
-    }
+    for (i = 0; i < (int)HOOK_COUNT; i++)
+        if (hooks[i].active) count++;
     return count;
-}
-
-static int install_hook(hook_entry_t *h);
-
-static int is_hooked_nr(int nr)
-{
-    int i;
-    for (i = 0; i < (int)TIER1_COUNT; i++) {
-        if (tier1_hooks[i].nr == nr && tier1_hooks[i].active) return 1;
-    }
-    for (i = 0; i < (int)TIER2_COUNT; i++) {
-        if (tier2_hooks[i].nr == nr && tier2_hooks[i].active) return 1;
-    }
-    return 0;
-}
-
-static int ensure_hooked_nr(int nr)
-{
-    int i;
-    if (nr < 0 || nr >= 460) return 0;
-    if (is_hooked_nr(nr)) return 1;
-    /* Only install entries with a statically reviewed syscall arity. */
-    for (i = 0; i < (int)TIER1_COUNT; i++) {
-        if (tier1_hooks[i].nr == nr)
-            return install_hook(&tier1_hooks[i]) == 0;
-    }
-    for (i = 0; i < (int)TIER2_COUNT; i++) {
-        if (tier2_hooks[i].nr == nr)
-            return install_hook(&tier2_hooks[i]) == 0;
-    }
-    return 0;
 }
 
 static void after_clone_ret(hook_fargs0_t *args, void *udata)
 {
-    int nr = (int)(unsigned long)udata;
+    hook_entry_t *hook = (hook_entry_t *)udata;
+    int nr = hook->nr;
     long ret = (long)args->ret;
     int uid;
     unsigned int tid;
@@ -2000,6 +1859,7 @@ static void after_clone_ret(hook_fargs0_t *args, void *udata)
     unsigned int bt_depth = 0;
     char desc[DESC_BUF_SIZE];
     int n = 0;
+    unsigned long long monotonic_ns;
     if (!g_enabled) return;
     if (ret <= 0) return;
     uid = (int)current_uid();
@@ -2007,6 +1867,7 @@ static void after_clone_ret(hook_fargs0_t *args, void *udata)
     if (nr != __NR_clone && nr != 435) return;
     if (!bitmap_test(g_nr_bitmap, nr)) return;
 
+    monotonic_ns = g_ktime_get();
     tid = (unsigned int)raw_syscall0(__NR_gettid);
     tgid = (unsigned int)raw_syscall0(__NR_getpid);
     slot = (tid * 2654435761u) & (CLONE_CTX_SLOTS - 1);
@@ -2043,83 +1904,73 @@ static void after_clone_ret(hook_fargs0_t *args, void *udata)
                bt_depth, bt,
                clone_fn,
                (unsigned long)ret,
-               desc);
+               desc, EVENT_RETURN, 0, monotonic_ns);
 }
 
-static void after_read_ret(hook_fargs0_t *args, void *udata)
+static void after_generic_ret(hook_fargs0_t *args, void *udata)
 {
-    int nr = (int)(unsigned long)udata;
-    long ret = (long)args->ret;
+    hook_entry_t *hook = (hook_entry_t *)udata;
+    int nr = hook->nr;
     int uid;
-    unsigned long a0 = 0, a1 = 0, a2 = 0;
-    unsigned long pc = 0;
-    unsigned long caller = 0;
-    unsigned long fp = 0;
-    unsigned long sp = 0;
+    long ret = (long)args->ret;
+    uint64_t *a = args->local.data;
+    unsigned int capacity = (unsigned int)(args->local.data6 >> 32);
+    struct pt_regs *r;
     unsigned long bt[MAX_BT];
-    unsigned int bt_depth = 0;
+    unsigned int depth = 0;
     char desc[DESC_BUF_SIZE];
-    int n = 0;
-    unsigned int tid;
-    unsigned int tgid;
-    unsigned int slot;
-
-    if (!g_enabled) return;
+    int n;
+    unsigned long long monotonic_ns;
+    if (!g_enabled || !args->local.data7 ||
+        args->local.data7 != g_capture_generation) return;
     uid = (int)current_uid();
-    if (!target_matches(uid)) return;
-    if (nr != __NR_read) return;
-    if (!bitmap_test(g_nr_bitmap, nr)) return;
+    if (!target_matches(uid) || !bitmap_test(g_nr_bitmap, nr)) return;
 
-    tid = (unsigned int)raw_syscall0(__NR_gettid);
-    tgid = (unsigned int)raw_syscall0(__NR_getpid);
-    slot = (tid * 2654435761u) & (READ_CTX_SLOTS - 1);
-    if (g_read_ctx[slot].pid == (int)tid && g_read_ctx[slot].tgid == (int)tgid) {
-        a0 = (unsigned long)g_read_ctx[slot].fd;
-        a1 = g_read_ctx[slot].buf;
-        a2 = g_read_ctx[slot].count;
-    } else {
-        a0 = syscall_argn(args, 0);
-        a1 = syscall_argn(args, 1);
-        a2 = syscall_argn(args, 2);
-    }
-
-    {
-        struct pt_regs *r = 0;
-        if (!r) r = _task_pt_reg(current);
-        if (r) {
-            pc = (unsigned long)r->pc;
-            caller = (unsigned long)r->regs[30];
-            fp = (unsigned long)r->regs[29];
-            sp = (unsigned long)r->sp;
-            memzero(bt, sizeof(bt));
-            bt_depth = unwind_user_fp(r, bt);
+    monotonic_ns = g_ktime_get();
+    n = snprintf(desc, sizeof(desc), "ret=%ld", ret);
+    if (nr == 63 || nr == 67 || nr == 207) {
+        n += snprintf(desc + n, sizeof(desc) - n, " fd=%d count=%lu ", (int)a[0], a[2]);
+        if (nr == 207 && ret >= 0 && a[4] && a[5]) {
+            unsigned int len = 0;
+            if (safe_copy_user_bytes((char *)&len, a[5], sizeof(len)) == sizeof(len)) {
+                if (len > capacity) len = capacity;
+                n += parse_sockaddr(desc + n, sizeof(desc) - n, a[4], (int)len);
+            }
+        }
+        if (ret > 0 && n < sizeof(desc) - 64) {
+            unsigned long want = (unsigned long)ret < a[2] ? (unsigned long)ret : a[2];
+            n += data_preview(desc + n, sizeof(desc) - n, a[1], want);
+        }
+    } else if (nr == 65 && ret > 0) {
+        n += preview_iov(desc + n, sizeof(desc) - n, a[1], a[2], (unsigned long)ret);
+    } else if (nr == 212 && ret >= 0) {
+        n += preview_msg(desc + n, sizeof(desc) - n, a[1], (unsigned long)ret, 1, capacity);
+    } else if (nr == 209 && ret == 0) {
+        unsigned int len = 0;
+        int value = 0;
+        if (safe_copy_user_bytes((char *)&len, a[4], sizeof(len)) == sizeof(len)) {
+            n += snprintf(desc + n, sizeof(desc) - n, " optlen=%u", len);
+            if (a[1] == 1 && a[2] == 4 && len >= sizeof(value) && capacity >= sizeof(value) &&
+                safe_copy_user_bytes((char *)&value, a[3], sizeof(value)) == sizeof(value))
+                n += snprintf(desc + n, sizeof(desc) - n, " SO_ERROR=%d", value);
+        }
+    } else if ((nr == 202 || nr == 242) && ret >= 0 && a[1] && a[2]) {
+        unsigned int len = 0;
+        if (safe_copy_user_bytes((char *)&len, a[2], sizeof(len)) == sizeof(len)) {
+            if (len > capacity) len = capacity;
+            n += parse_sockaddr(desc + n, sizeof(desc) - n, a[1], (int)len);
         }
     }
-
-    n = snprintf(desc, sizeof(desc), "fd=%d count=%lu ret=%ld\n", (int)a0, a2, ret);
-    if (ret > 0) {
-        unsigned long want = (unsigned long)ret;
-        if (want > a2) want = a2;
-        if (want > DATA_PREVIEW) want = DATA_PREVIEW;
-        if (want > 0 && n < (int)sizeof(desc) - 8) {
-            n += data_preview(desc + n, (int)sizeof(desc) - n, a1, want);
-        }
+    r = _task_pt_reg(current);
+    /* Paired calls already carry their full entry backtrace. */
+    if (nr == 63 && r) {
+        memzero(bt, sizeof(bt));
+        depth = unwind_user_fp(r, bt);
     }
-
-    push_event(nr, uid,
-               a0, a1, a2, 0, 0, 0,
-               pc, caller, fp, sp,
-               bt_depth, bt,
-               0,
-               (unsigned long)ret,
-               desc);
-}
-
-static void *hook_after_for_nr(int nr)
-{
-    if (nr == __NR_clone || nr == 435) return (void *)after_clone_ret;
-    if (nr == __NR_read) return (void *)after_read_ret;
-    return (void *)0;
+    push_event(nr, uid, a[0], a[1], a[2], a[3], a[4], a[5],
+               r ? r->pc : 0, r ? r->regs[30] : 0, r ? r->regs[29] : 0,
+               r ? r->sp : 0, depth, bt, 0, (unsigned long)ret,
+               desc, EVENT_RETURN, (unsigned int)args->local.data6, monotonic_ns);
 }
 
 static int prefer_fp_hook(int nr)
@@ -2147,8 +1998,8 @@ static int install_hook(hook_entry_t *h)
     force_fp = prefer_fp_hook(h->nr);
     if (!force_fp) {
         err = inline_hook_syscalln(h->nr, h->narg,
-                                   (void *)before_generic, hook_after_for_nr(h->nr),
-                                   (void *)(unsigned long)h->nr);
+                                   (void *)before_generic, h->after,
+                                   (void *)h);
         if (err == HOOK_NO_ERR) {
             h->active = 1;
             h->method = HOOK_INLINE;
@@ -2157,8 +2008,8 @@ static int install_hook(hook_entry_t *h)
     }
 
     err = fp_hook_syscalln(h->nr, h->narg,
-                           (void *)before_generic, hook_after_for_nr(h->nr),
-                           (void *)(unsigned long)h->nr);
+                           (void *)before_generic, h->after,
+                           (void *)h);
     if (err == HOOK_NO_ERR) {
         h->active = 1;
         h->method = HOOK_FP;
@@ -2172,19 +2023,58 @@ static void remove_hook(hook_entry_t *h)
 {
     if (!h->active) return;
     if (h->method == HOOK_INLINE)
-        inline_unhook_syscalln(h->nr, (void *)before_generic, hook_after_for_nr(h->nr));
+        inline_unhook_syscalln(h->nr, (void *)before_generic, h->after);
     else
-        fp_unhook_syscalln(h->nr, (void *)before_generic, hook_after_for_nr(h->nr));
+        fp_unhook_syscalln(h->nr, (void *)before_generic, h->after);
     h->active = 0;
 }
 
-static int install_tier1(void)
+/* Configuration is called with the control channel exclusively owned. */
+static hook_entry_t *find_hook(int nr)
 {
-    int i, ok = 0;
-    for (i = 0; i < (int)TIER1_COUNT; i++) {
-        if (install_hook(&tier1_hooks[i]) == 0) ok++;
+    int i;
+    for (i = 0; i < (int)HOOK_COUNT; i++)
+        if (hooks[i].nr == nr) return &hooks[i];
+    return 0;
+}
+
+static int configure_hooks(const char *selection, char *buf, int blen)
+{
+    unsigned long selected[BITMAP_LONGS] = {0};
+    const char *p = selection;
+    int count = 0, i;
+    if (g_enabled)
+        return snprintf(buf, blen, "{\"ok\":false,\"code\":\"KPM_MONITORING_ENABLED\"}");
+    /* Validate the entire request before changing hooks or the logging bitmap. */
+    while (1) {
+        int nr = 0;
+        while (*p == ' ') p++;
+        if (*p < '0' || *p > '9')
+            return snprintf(buf, blen, "{\"ok\":false,\"code\":\"KPM_SYSCALL_SELECTION_INVALID\"}");
+        while (*p >= '0' && *p <= '9') {
+            int digit = *p++ - '0';
+            if (nr > (MAX_NR - 1 - digit) / 10)
+                return snprintf(buf, blen, "{\"ok\":false,\"code\":\"SYSCALL_UNSUPPORTED\"}");
+            nr = nr * 10 + digit;
+        }
+        if (!find_hook(nr))
+            return snprintf(buf, blen, "{\"ok\":false,\"code\":\"SYSCALL_UNSUPPORTED\",\"nr\":%d}", nr);
+        if (!bitmap_test(selected, nr)) {
+            bitmap_set(selected, nr);
+            count++;
+        }
+        while (*p == ' ') p++;
+        if (!*p) break;
+        if (*p++ != ',')
+            return snprintf(buf, blen, "{\"ok\":false,\"code\":\"KPM_SYSCALL_SELECTION_INVALID\"}");
     }
-    return ok;
+    for (i = 0; i < (int)HOOK_COUNT; i++) {
+        hook_entry_t *h = &hooks[i];
+        if (bitmap_test(selected, h->nr) && !h->active && install_hook(h) != 0)
+            return snprintf(buf, blen, "{\"ok\":false,\"code\":\"KPM_HOOK_INSTALL_FAILED\",\"nr\":%d}", h->nr);
+    }
+    for (i = 0; i < BITMAP_LONGS; i++) g_nr_bitmap[i] = selected[i];
+    return snprintf(buf, blen, "{\"ok\":true,\"set_nrs_count\":%d,\"skipped\":0}", count);
 }
 
 /* ================================================================
@@ -2204,6 +2094,7 @@ static int parse_int(const char *s, int *consumed)
 
 /* Control response and binary record buffers. */
 static char g_outbuf[4096];
+static int g_control_busy;
 static unsigned char g_bin_line[2048];
 
 static int copy_event_locked(svc_event_t *out, int idx)
@@ -2213,6 +2104,9 @@ static int copy_event_locked(svc_event_t *out, int idx)
     if (!out || !g_events) return 0;
     src = &g_events[idx];
     out->seq = src->seq;
+    out->event_flags = src->event_flags;
+    out->entry_seq = src->entry_seq;
+    out->monotonic_ns = src->monotonic_ns;
     out->nr = src->nr;
     out->tgid = src->tgid;
     out->pid = src->pid;
@@ -2314,7 +2208,7 @@ static int format_event_bin(unsigned char *buf, int blen, const svc_event_t *ev)
 
     if (!put_u32(buf, blen, &off, 0x45435653U)) return 0;
     if (!put_u16(buf, blen, &off, 2)) return 0;
-    if (!put_u16(buf, blen, &off, 0)) return 0;
+    if (!put_u16(buf, blen, &off, ev->event_flags)) return 0;
     if (!put_u32(buf, blen, &off, 0)) return 0;
 
     if (!put_u32(buf, blen, &off, (unsigned int)ev->seq)) return 0;
@@ -2339,7 +2233,7 @@ static int format_event_bin(unsigned char *buf, int blen, const svc_event_t *ev)
 
     bt_depth = ev->bt_depth > MAX_BT ? MAX_BT : ev->bt_depth;
     if (!put_u32(buf, blen, &off, bt_depth)) return 0;
-    if (!put_u32(buf, blen, &off, 0)) return 0;
+    if (!put_u32(buf, blen, &off, ev->entry_seq)) return 0;
     for (i = 0; i < MAX_BT; i++) {
         if (!put_u64(buf, blen, &off, (unsigned long long)ev->bt[i])) return 0;
     }
@@ -2349,10 +2243,13 @@ static int format_event_bin(unsigned char *buf, int blen, const svc_event_t *ev)
     desc_len = (unsigned int)strlen(ev->desc);
     if (desc_len > (DESC_BUF_SIZE - 1)) desc_len = (DESC_BUF_SIZE - 1);
     if (!put_u16(buf, blen, &off, desc_len)) return 0;
-    if (!put_u16(buf, blen, &off, 0)) return 0;
+    /* v2 extension bit 0: CLOCK_MONOTONIC nanoseconds after the description. */
+    if (!put_u16(buf, blen, &off, 1)) return 0;
     if (desc_len > 0) {
         if (!put_bytes(buf, blen, &off, ev->desc, (int)desc_len)) return 0;
     }
+
+    if (!put_u64(buf, blen, &off, ev->monotonic_ns)) return 0;
 
     buf[8] = (unsigned char)(off & 0xFF);
     buf[9] = (unsigned char)((off >> 8) & 0xFF);
@@ -2559,10 +2456,27 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
     char *buf = g_outbuf;
     int blen = sizeof(g_outbuf);
 
+    /* Do not hold the event lock while installing hooks or copying to userspace. */
+    ev_lock();
+    if (g_control_busy) {
+        static const char busy[] = "{\"ok\":false,\"code\":\"KPM_CONTROL_BUSY\"}";
+        int copy = sizeof(busy) - 1;
+        ev_unlock();
+        if (copy >= outlen) copy = outlen - 1;
+        if (out_msg && copy > 0) compat_copy_to_user(out_msg, busy, copy);
+        return 0;
+    }
+    g_control_busy = 1;
+    ev_unlock();
+
     /* ---- status ---- */
     if (!strcmp(args, "status")) {
         int hooks_installed = count_installed_hooks();
         int nr_logging = 0, i;
+        struct svc_timespec64 realtime;
+        unsigned long long mono_before = g_ktime_get();
+        g_ktime_get_real_ts64(&realtime);
+        unsigned long long mono_after = g_ktime_get();
         for (i = 0; i < MAX_NR; i++) {
             if (bitmap_test(g_nr_bitmap, i)) nr_logging++;
         }
@@ -2587,7 +2501,21 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
                 first = 0;
             }
         }
-        n += snprintf(buf + n, blen - n, "]}");
+        n += snprintf(buf + n, blen - n, "],\"hooks_supported\":%d,\"supported_nrs\":[", (int)HOOK_COUNT);
+        for (i = 0; i < (int)HOOK_COUNT; i++)
+            n += snprintf(buf + n, blen - n, "%s%d", i ? "," : "", hooks[i].nr);
+        n += snprintf(buf + n, blen - n, "],\"installed_nrs\":[");
+        first = 1;
+        for (i = 0; i < (int)HOOK_COUNT; i++) {
+            if (!hooks[i].active) continue;
+            n += snprintf(buf + n, blen - n, "%s%d", first ? "" : ",", hooks[i].nr);
+            first = 0;
+        }
+        n += snprintf(buf + n, blen - n,
+            "],\"clock\":{\"source\":\"CLOCK_MONOTONIC\","
+            "\"monotonic_before_ns\":%llu,\"realtime_ns\":%llu,\"monotonic_after_ns\":%llu}}",
+            mono_before, (unsigned long long)realtime.tv_sec * 1000000000ULL + realtime.tv_nsec,
+            mono_after);
     }
 
     /* ---- sysnr <name> ---- */
@@ -2626,6 +2554,10 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
 
     /* ---- enable ---- */
     else if (!strcmp(args, "enable")) {
+        if (!g_enabled) {
+            if (++g_capture_generation == 0) ++g_capture_generation;
+        }
+        mb_ish();
         g_enabled = 1;
         n = snprintf(buf, blen, "{\"ok\":true,\"enabled\":true}");
     }
@@ -2638,30 +2570,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
 
     /* ---- set_nrs <n1>,<n2>,... ---- */
     else if (!strncmp(args, "set_nrs ", 8)) {
-        int i;
-        const char *p = args + 8;
-        int cnt = 0;
-        int skip = 0;
-        for (i = 0; i < BITMAP_LONGS; i++)
-            g_nr_bitmap[i] = 0;
-        while (*p) {
-            while (*p == ' ' || *p == ',') p++;
-            if (*p == '\0') break;
-            int consumed = 0;
-            int nr = parse_int(p, &consumed);
-            if (consumed > 0) {
-                if (ensure_hooked_nr(nr)) {
-                    bitmap_set(g_nr_bitmap, nr);
-                    cnt++;
-                } else {
-                    skip++;
-                }
-                p += consumed;
-            } else {
-                p++;
-            }
-        }
-        n = snprintf(buf, blen, "{\"ok\":true,\"set_nrs_count\":%d,\"skipped\":%d}", cnt, skip);
+        n = configure_hooks(args + 8, buf, blen);
     }
 
     /* ---- clear ---- */
@@ -2689,6 +2598,9 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
         }
     }
 
+    ev_lock();
+    g_control_busy = 0;
+    ev_unlock();
     return 0;
 }
 
@@ -2697,8 +2609,7 @@ static long svc_ctl0(const char *args, char *__user out_msg, int outlen)
  * ================================================================ */
 static long svc_init(const char *args, const char *event, void *__user reserved)
 {
-    int ok;
-    printk("svcsite v%s: init, installing hooks...\n", SVCSITE_KPM_VERSION);
+    printk("svcsite v%s: init, hooks install on selection\n", SVCSITE_KPM_VERSION);
 
     g_enabled = 0;
     g_target_uid = -1;
@@ -2722,9 +2633,6 @@ static long svc_init(const char *args, const char *event, void *__user reserved)
     }
     start_writer_thread();
 
-    ok = install_tier1();
-    printk("svcsite: tier1 installed %d/%d hooks\n", ok, (int)TIER1_COUNT);
-
     printk("svcsite: ready, g_enabled=0 (waiting for APP)\n");
     return 0;
 }
@@ -2739,11 +2647,8 @@ static long svc_exit(void *__user reserved)
 
     stop_writer_thread();
 
-    for (i = 0; i < (int)TIER2_COUNT; i++)
-        remove_hook(&tier2_hooks[i]);
-
-    for (i = 0; i < (int)TIER1_COUNT; i++)
-        remove_hook(&tier1_hooks[i]);
+    for (i = 0; i < (int)HOOK_COUNT; i++)
+        remove_hook(&hooks[i]);
 
     if (g_msleep) g_msleep(100);
     free_events_storage();
